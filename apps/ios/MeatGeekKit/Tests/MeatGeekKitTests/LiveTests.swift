@@ -13,23 +13,26 @@ import Testing
 
 // MARK: - Fakes
 
+/// How long `until` waits before it calls a wait stuck. One constant, never
+/// set per wait, so it cannot be tuned into a timing bet.
+let untilHangGuard: Duration = .seconds(30)
+
 /// Waits until `condition` holds, letting the code under test run between
-/// checks. It is a hang guard, not a timing bet: a wait that has not come true
-/// after `limit` (far longer than any of these waits takes) never will, so it
-/// records an issue naming `what` and returns, instead of spinning until the
-/// test plan's 300 s allowance with no word on which wait stuck.
+/// checks. It is a hang guard, not a timing bet: every wait here comes true
+/// in well under a second, so one that has not after `untilHangGuard` never
+/// will. It records an issue naming `what` and returns, instead of spinning
+/// until the test plan's 300 s allowance with no word on which wait stuck.
 @MainActor
 func until(
     _ what: String,
-    limit: Duration = .seconds(30),
     sourceLocation: SourceLocation = #_sourceLocation,
     _ condition: () -> Bool
 ) async {
     let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: limit)
+    let deadline = clock.now.advanced(by: untilHangGuard)
     while !condition() {
         if clock.now >= deadline {
-            Issue.record("Waited \(limit) for \"\(what)\"; it never came true", sourceLocation: sourceLocation)
+            Issue.record("Waited \(untilHangGuard) for \"\(what)\"; it never came true", sourceLocation: sourceLocation)
             return
         }
         await Task.yield()

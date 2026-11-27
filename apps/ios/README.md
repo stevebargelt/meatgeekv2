@@ -160,7 +160,10 @@ is iOS only (`platforms: [.iOS(.v18)]`), so always test it through the scheme.
 Tests follow the repository's
 [deterministic test rule](../../docs/development/deterministic-tests.md): no
 sleeps and no timeouts that decide a result. The unit tests await every step
-(the fakes answer in process). A UI test waits for an element with
+(the fakes answer in process); where they poll, they use MeatGeekKit's
+`until`, whose one fixed 30 s hang guard names the wait that stuck (the rule's
+one exception; see [Swift (iOS)](../../docs/development/deterministic-tests.md#swift-ios)).
+A UI test waits for an element with
 `waitUntilExists`, which has no deadline of its own: the hang guard is the
 test plan's execution time allowance (`defaultTestExecutionTimeAllowance`,
 300 s, in `MeatGeek.xctestplan`), as Jest's `testTimeout` is for the web.
