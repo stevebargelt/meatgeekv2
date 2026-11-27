@@ -1513,7 +1513,11 @@ paths:
       The phones the caller's alerts go to. When a channel of one of the
       caller's running cooks reaches its target, an alert is sent through
       Apple's push service to every phone registered here. A phone Apple says
-      is gone (410, or 400 BadDeviceToken) is removed by the API.
+      is gone (410, or 400 BadDeviceToken) is removed by the API. A phone
+      belongs to one account: the one that registered its token last. When the
+      iOS app signs out it deletes its token here (best effort) and unregisters
+      from Apple's push service, so an alert to that token is answered 410
+      Unregistered and the API removes it even if the delete never arrived.
     get:
       operationId: listPushTokens
       summary: List the caller's registered phones
@@ -1543,7 +1547,9 @@ paths:
         Registers the APNs device token for the signed-in user. Registering a
         token again is 200 and moves its `registeredAt` to now. A caller keeps
         at most 10 phones; registering an eleventh drops the least recently
-        registered.
+        registered. A token another user holds moves to the caller (201): it
+        leaves that user's phones, so only the newest account on the phone gets
+        alerts on it.
       tags:
         - users
       requestBody:

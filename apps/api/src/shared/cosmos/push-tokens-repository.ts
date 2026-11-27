@@ -16,6 +16,15 @@ import { getCosmosAdapter } from './cosmos-adapter';
  * container, so it never sees this one. A user id is `"<tid>:<oid>"`, so no
  * user id can begin with `push-tokens:`.
  *
+ * ONE HOLDER PER PHONE. A token belongs to the account that registered it
+ * last: a second document, id `push-token-owner:<tokenId>`, names the user
+ * that holds it. Registering a token another user holds moves it: the owner
+ * document changes first, then the token leaves the other user's document, so
+ * a phone signed in to a new account stops getting the old account's alerts.
+ * Removing a token forgets its owner when the remover is the owner. A token
+ * registered before this document existed gets one at its next registration
+ * (the app registers on every launch).
+ *
  * IDS, NOT TOKENS. A token is a delivery address: it is never returned, never
  * put in a URL and never logged. Each is known outside this file by its id,
  * the SHA-256 of the token in hex, which the app can compute itself and which
@@ -66,6 +75,17 @@ export function pushTokenId(token: string): string {
 
 export function pushTokensDocumentId(userId: string): string {
   return `push-tokens:${userId}`;
+}
+
+/** The id of the document naming the user that holds a token. */
+export function pushTokenOwnerDocumentId(tokenId: string): string {
+  return `push-token-owner:${tokenId}`;
+}
+
+interface PushTokenOwnerDocument {
+  readonly id: string;
+  readonly tokenId: string;
+  readonly userId: string;
 }
 
 function statusCodeOf(error: unknown): number | undefined {
@@ -182,6 +202,106 @@ export class PushTokensRepository {
     }
   }
 
+  private async readOwner(
+    tokenId: string
+  ): Promise<{ userId?: string; etag?: string; requestCharge: number }> {
+    const id = pushTokenOwnerDocumentId(tokenId);
+    try {
+      const response: ItemResponse<PushTokenOwnerDocument> = await this.container
+        .item(id, id)
+        .read<PushTokenOwnerDocument>();
+      if (response.statusCode === 404 || response.resource === undefined) {
+        return { requestCharge: response.requestCharge };
+      }
+      const userId = response.resource.userId;
+      return {
+        userId: typeof userId === 'string' ? userId : '',
+        etag: response.etag,
+        requestCharge: response.requestCharge,
+      };
+    } catch (error) {
+      if (statusCodeOf(error) === 404) {
+        return { requestCharge: chargeOf(error) };
+      }
+      throw new PushTokensStoreError(statusCodeOf(error), chargeOf(error));
+    }
+  }
+
+  /**
+   * Makes `userId` the holder of `tokenId`. Returns the user that held it
+   * before, when that was someone else.
+   */
+  private async claimOwner(
+    tokenId: string,
+    userId: string
+  ): Promise<{ previous?: string; requestCharge: number }> {
+    const id = pushTokenOwnerDocumentId(tokenId);
+    const document: PushTokenOwnerDocument = { id, tokenId, userId };
+    let requestCharge = 0;
+    for (let attempt = 1; ; attempt++) {
+      const current = await this.readOwner(tokenId);
+      requestCharge += current.requestCharge;
+      if (current.userId === userId) {
+        return { requestCharge };
+      }
+      try {
+        const response =
+          current.userId !== undefined
+            ? await this.container
+                .item(id, id)
+                .replace<PushTokenOwnerDocument>(
+                  document,
+                  current.etag
+                    ? { accessCondition: { type: 'IfMatch', condition: current.etag } }
+                    : undefined
+                )
+            : await this.container.items.create<PushTokenOwnerDocument>(document);
+        requestCharge += response.requestCharge;
+        return {
+          previous:
+            current.userId === undefined || current.userId === '' ? undefined : current.userId,
+          requestCharge,
+        };
+      } catch (error) {
+        const status = statusCodeOf(error);
+        requestCharge += chargeOf(error);
+        if (
+          (status === 412 || status === 409 || status === 404) &&
+          attempt < PUSH_TOKENS_MAX_ATTEMPTS
+        ) {
+          continue;
+        }
+        throw new PushTokensStoreError(status, requestCharge);
+      }
+    }
+  }
+
+  /** Forgets who holds `tokenId`, when it is `userId`. */
+  private async releaseOwner(tokenId: string, userId: string): Promise<number> {
+    const current = await this.readOwner(tokenId);
+    if (current.userId !== userId) {
+      return current.requestCharge;
+    }
+    const id = pushTokenOwnerDocumentId(tokenId);
+    try {
+      const response = await this.container
+        .item(id, id)
+        .delete(
+          current.etag
+            ? { accessCondition: { type: 'IfMatch', condition: current.etag } }
+            : undefined
+        );
+      return current.requestCharge + response.requestCharge;
+    } catch (error) {
+      const status = statusCodeOf(error);
+      // Gone already, or another user took it over in between: theirs now.
+      if (status === 404 || status === 412) {
+        return current.requestCharge + chargeOf(error);
+      }
+      throw new PushTokensStoreError(status, current.requestCharge + chargeOf(error));
+    }
+  }
+
   /** The user's tokens, for sending. Never returned to a caller. */
   async listTokens(userId: string): Promise<{ tokens: StoredPushToken[]; requestCharge: number }> {
     const { tokens, requestCharge } = await this.read(userId);
@@ -199,6 +319,7 @@ export class PushTokensRepository {
   /**
    * Registers `token` for `userId`. Registering a token again moves its
    * `registeredAt` to now. `created` is false when it was already registered.
+   * A token another user holds moves to `userId`: it leaves their document.
    */
   async register(
     userId: string,
@@ -216,11 +337,30 @@ export class PushTokensRepository {
         .slice(0, MAX_PUSH_TOKENS_PER_USER - 1);
       return [...kept, { id, token: normalized, registeredAt }];
     });
-    return { token: { id, registeredAt }, created, requestCharge: result.requestCharge };
+    let requestCharge = result.requestCharge;
+    const owner = await this.claimOwner(id, userId);
+    requestCharge += owner.requestCharge;
+    if (owner.previous !== undefined) {
+      const taken = await this.removeFromUser(owner.previous, id);
+      requestCharge += taken.requestCharge;
+    }
+    return { token: { id, registeredAt }, created, requestCharge };
   }
 
-  /** Removes the token with this id. Removing one that is not there is not an error. */
+  /**
+   * Removes the token with this id, and forgets its holder when that is
+   * `userId`. Removing one that is not there is not an error.
+   */
   async remove(
+    userId: string,
+    tokenId: string
+  ): Promise<{ removed: boolean; requestCharge: number }> {
+    const result = await this.removeFromUser(userId, tokenId);
+    const released = await this.releaseOwner(tokenId, userId);
+    return { removed: result.removed, requestCharge: result.requestCharge + released };
+  }
+
+  private async removeFromUser(
     userId: string,
     tokenId: string
   ): Promise<{ removed: boolean; requestCharge: number }> {

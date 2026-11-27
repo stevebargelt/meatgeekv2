@@ -31,6 +31,11 @@ public protocol NotificationsPort: AnyObject {
     /// Asks APNs for the phone's device token. It arrives through
     /// `onDeviceToken`, now or later, and again whenever it changes.
     func registerForRemoteNotifications()
+    /// Tells APNs this phone no longer takes pushes for the signed-out
+    /// account: Apple then answers `410 Unregistered` for its old token, and
+    /// the API deletes it. The next `registerForRemoteNotifications()` (the
+    /// next sign-in) registers again.
+    func unregisterForRemoteNotifications()
     /// Each device token iOS hands the app, as raw bytes.
     func onDeviceToken(_ handler: @escaping @MainActor (Data) -> Void)
     /// The cook id of an alert the pitmaster tapped. A tap from before the
@@ -56,13 +61,20 @@ public enum AlertPayload {
 /// phone's APNs token with the API (`POST /users/me/push-tokens`) once
 /// permission is granted and whenever the token changes, removes it
 /// (`DELETE /users/me/push-tokens/{tokenId}`) when the pitmaster signs out,
-/// and passes a tapped alert's cook on to the screens.
+/// then unregisters the phone from APNs, and passes a tapped alert's cook on to the screens.
 ///
 /// A registration counts for the sign-in that made it: after any sign-in,
-/// including one that follows a 401, the token is registered again. The
-/// last token this phone registered is kept in `defaults` (when given), so a
-/// token that changed between launches, or a sign-out before iOS hands the
-/// token over, still removes it from the API.
+/// including one that follows a 401, the token is registered again. Each
+/// launch asks APNs for the token and sends what iOS hands over; a stored
+/// token is never sent. The last token this phone registered is kept in
+/// `defaults` (when given) only to delete it, so a token that changed between
+/// launches, or a sign-out before iOS hands the token over, still removes it
+/// from the API.
+///
+/// Sign-out deletes the token best effort, then calls
+/// `unregisterForRemoteNotifications()` whatever the API answered, so a phone
+/// whose delete never reached the API still stops getting that account's
+/// alerts: Apple answers the old token `410 Unregistered` and the API drops it.
 ///
 /// Work runs one step at a time, in the order it was asked for, so a
 /// registration and a sign-out never race. From the start of a sign-out to
@@ -212,10 +224,10 @@ public final class NotificationsModel {
         }
     }
 
-    /// Before the session signs out: the API forgets this phone, so the
-    /// signed-out phone gets no alerts. Runs after the steps already asked
-    /// for, and nothing registers again until the next sign-in. A failure
-    /// does not stop the sign-out.
+    /// Before the session signs out: the API forgets this phone, then APNs
+    /// does, so the signed-out phone gets no alerts even when the delete
+    /// failed. Runs after the steps already asked for, and nothing registers
+    /// again until the next sign-in. A failure does not stop the sign-out.
     private func signingOut() async {
         closedSignIn = session.signIns
         enqueue { [self] in
@@ -223,6 +235,8 @@ public final class NotificationsModel {
             for token in tokens.sorted() {
                 await delete(token)
             }
+            port.unregisterForRemoteNotifications()
+            deviceToken = nil
             registeredToken = nil
             registeredIn = nil
             lastToken = nil
@@ -280,6 +294,8 @@ public final class StubNotifications: NotificationsPort {
     public func registerForRemoteNotifications() {
         tokenHandler?(Self.token)
     }
+
+    public func unregisterForRemoteNotifications() {}
 
     public func onDeviceToken(_ handler: @escaping @MainActor (Data) -> Void) {
         tokenHandler = handler
