@@ -1015,7 +1015,8 @@ struct CookDetailLiveTests {
         hub.emit(LiveFixtures.temperature(at: 15))
         #expect(reads.value == 2)
         gate.open()
-        await until("one more re-read") { reads.value == 3 && !detail.isReReading }
+        await until("the re-reads finished") { reads.value >= 3 && !detail.isReReading }
+        #expect(reads.value == 3)
         #expect(detail.cook == active)
         #expect(detail.live === live)
         detail.disappear()
@@ -1048,6 +1049,49 @@ struct CookDetailLiveTests {
         #expect(detail.cook == stopped)
         #expect(detail.live == nil)
         #expect(hubs.hubs.count == 1)
+        detail.disappear()
+    }
+
+    @Test("a re-read answered after a reload of the still-active cook is dropped: the newer cook stays")
+    func reReadOlderThanReloadIsDropped() async throws {
+        var active = CookFixtures.cook("c1", device: "box", status: .active)
+        active.targetTemps = .init(probe1: 203)
+        var older = active
+        older.targetsReached = .init(probe1: .init(reachedAt: fixedNow))
+        var newer = active
+        newer.targetTemps = .init(probe1: 210)
+        let served = (active: active, older: older, newer: newer)
+        let reads = Box(0)
+        let gate = Gate()
+        let (_, detail, hubs) = await Self.models(active: active) { _ in
+            reads.value += 1
+            switch reads.value {
+            case 2:
+                // The re-read after the reading: held, then answers with
+                // the cook as it was before the reload.
+                await gate.pass()
+                return .ok(.init(body: .json(served.older)))
+            case 3: return .ok(.init(body: .json(served.newer)))
+            default: return .ok(.init(body: .json(served.active)))
+            }
+        }
+        detail.appear()
+        await detail.start()
+        let live = try #require(detail.live)
+        await until("connected") { live.status == .connected }
+
+        try #require(hubs.latest).emit(LiveFixtures.temperature(at: 5, probe1: 205))
+        await gate.waitUntilEntered()
+        await detail.reload()
+        #expect(detail.cook == newer)
+        gate.open()
+        await until("the re-read answered") { !detail.isReReading }
+        #expect(reads.value == 3)
+        #expect(detail.cook == newer)
+        #expect(detail.live === live)
+        #expect(live.targets == newer.targetTemps)
+        #expect(live.reached == nil)
+        detail.disappear()
     }
 
     @Test("a completed cook has no live panel; without live services there is none")

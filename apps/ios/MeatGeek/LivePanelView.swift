@@ -5,7 +5,8 @@ import SwiftUI
 /// No reading for …), Grill and Probes 1–4 with each one's target and a
 /// reached probe's mark, and when the reading was taken.
 /// Re-read every second, so the age and "No reading for …" advance without a
-/// new message. Mirrors apps/web/src/live/live-panel.tsx.
+/// new message. Mirrors apps/web/src/live/live-panel.tsx, except that the
+/// web panel does not show targets or reached marks yet.
 struct LivePanelView: View {
     let model: LivePanelModel
 
@@ -39,11 +40,13 @@ struct LivePanelView: View {
                                 if let reached = channel.reached {
                                     Text(reached)
                                         .foregroundStyle(.green)
+                                        .accessibilityLabel("\(channel.label), \(reached)")
                                         .accessibilityIdentifier(AccessibilityID.liveReached(channel.id))
                                 }
                                 if let target = channel.target {
                                     Text(target)
                                         .foregroundStyle(.secondary)
+                                        .accessibilityLabel("\(channel.label), \(target)")
                                         .accessibilityIdentifier(AccessibilityID.liveTarget(channel.id))
                                 }
                             }

@@ -370,7 +370,7 @@ final class MeatGeekUITests: XCTestCase {
         // channel has one, and nothing has reached its target.
         let probe1Target = app.staticTexts[ID.liveTarget("probe1")]
         waitUntilExists(probe1Target, "probe 1's target on the live screen")
-        XCTAssertEqual(probe1Target.label, "Target 203 °F")
+        XCTAssertEqual(probe1Target.label, "Probe 1, Target 203 °F")
         XCTAssertFalse(app.staticTexts[ID.liveTarget("grill")].exists)
         XCTAssertFalse(app.staticTexts[ID.liveReached("probe1")].exists)
         waitUntilLabel(badge, "Live", "the live badge")
