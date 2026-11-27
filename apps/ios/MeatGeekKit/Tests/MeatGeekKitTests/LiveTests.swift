@@ -903,12 +903,14 @@ struct CookDetailLiveTests {
     /// `getCook` answers `GET /cooks/{cookId}`: `active`, unless the test says otherwise.
     static func models(
         active: Cook,
-        getCook: (@Sendable (Operations.GetCook.Input) async -> Operations.GetCook.Output)? = nil
+        getCook: (@Sendable (Operations.GetCook.Input) async -> Operations.GetCook.Output)? = nil,
+        updateTargets: (@Sendable (Operations.UpdateCookTargets.Input) async -> Operations.UpdateCookTargets.Output)? = nil
     ) async -> (CooksModel, CookDetailModel, FakeHubs) {
         let hubs = FakeHubs()
         let clock = VirtualClock()
         var api = CookFixtures.api(active: [active]) { _ in CookFixtures.page([active]) }
         api.getCookHandler = getCook ?? { _ in .ok(.init(body: .json(active))) }
+        if let updateTargets { api.updateCookTargetsHandler = updateTargets }
         api.negotiateHandler = { _ in .ok(.init(body: .json(LiveFixtures.info(1)))) }
         api.getCurrentTemperaturesHandler = { _ in .notFound(.init(body: .json(CookFixtures.error(.noReadings, "none")))) }
         let session = SessionModel(tokenProvider: FakeTokenProvider(account: DeviceFixtures.account), api: api)
@@ -990,6 +992,61 @@ struct CookDetailLiveTests {
         #expect(marks() == [nil, nil, nil, nil, nil])
         #expect(detail.isActive)
         detail.disappear()
+    }
+
+    @Test("a target saved on one phone shows on its live panel at once, and on a second phone's with its next reading")
+    func targetChangedOnAnotherPhone() async throws {
+        var active = CookFixtures.cook("c1", device: "box", status: .active, name: "Brisket")
+        active.targetTemps = .init(probe1: 165)
+        active.targetsReached = .init(probe1: .init(reachedAt: fixedNow))
+        // One server for both phones: the cook as it is stored.
+        let served = Box(active)
+        let reads = Box(0)
+        let getCook: @Sendable (Operations.GetCook.Input) async -> Operations.GetCook.Output = { _ in
+            reads.value += 1
+            return .ok(.init(body: .json(served.value)))
+        }
+        let updateTargets: @Sendable (Operations.UpdateCookTargets.Input) async -> Operations.UpdateCookTargets.Output = { input in
+            guard case .json(let body) = input.body else { return .undocumented(statusCode: 415, .init()) }
+            var saved = served.value
+            saved.targetTemps = .init(probe1: body.targetTemps.probe1)
+            saved.targetsReached = nil
+            served.value = saved
+            return .ok(.init(body: .json(saved)))
+        }
+        let (_, phoneA, hubsA) = await Self.models(active: active, getCook: getCook, updateTargets: updateTargets)
+        let (_, phoneB, hubsB) = await Self.models(active: active, getCook: getCook, updateTargets: updateTargets)
+        for phone in [phoneA, phoneB] {
+            phone.appear()
+            await phone.start()
+        }
+        let liveA = try #require(phoneA.live)
+        let liveB = try #require(phoneB.live)
+        await until("both connected") { liveA.status == .connected && liveB.status == .connected }
+        try #require(hubsA.latest).emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 170))
+        try #require(hubsB.latest).emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 170))
+        func probe1(_ live: LivePanelModel) -> LivePanelDisplay.Channel { live.display().channels[1] }
+        // Two reads to open the screens, one re-read per reading.
+        await until("both re-read") { reads.value == 4 && !phoneA.isReReading && !phoneB.isReReading }
+        #expect(probe1(liveA).target == "Target 165 °F")
+        #expect(probe1(liveB).reached != nil)
+
+        // Wrap done: phone A sets the finish target.
+        let edit = try #require(phoneA.editTargets())
+        edit[target: .probe1] = "203"
+        _ = try #require(await edit.save())
+        #expect(probe1(liveA).target == "Target 203 °F")
+        #expect(probe1(liveA).reached == nil)
+        // Phone B has not read the cook since: it still shows the old target.
+        #expect(probe1(liveB).target == "Target 165 °F")
+
+        // Its next reading re-reads the cook, with no refresh.
+        try #require(hubsB.latest).emit(LiveFixtures.temperature(at: 10, grill: 230, probe1: 171))
+        await until("phone B re-read") { phoneB.cook?.targetTemps?.probe1 == 203 }
+        #expect(probe1(liveB).target == "Target 203 °F")
+        #expect(probe1(liveB).reached == nil)
+        phoneA.disappear()
+        phoneB.disappear()
     }
 
     @Test("readings during a re-read cost one more re-read, not one each; a failed re-read keeps the cook on screen")

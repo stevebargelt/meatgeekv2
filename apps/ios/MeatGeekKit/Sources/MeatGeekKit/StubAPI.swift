@@ -28,6 +28,8 @@ public struct StubAPI: APIProtocol {
         = { _ in throw NotStubbed(operationID: "getCookChart") }
     public var stopCookHandler: @Sendable (Operations.StopCook.Input) async throws -> Operations.StopCook.Output
         = { _ in throw NotStubbed(operationID: "stopCook") }
+    public var updateCookTargetsHandler: @Sendable (Operations.UpdateCookTargets.Input) async throws -> Operations.UpdateCookTargets.Output
+        = { _ in throw NotStubbed(operationID: "updateCookTargets") }
     public var negotiateHandler: @Sendable (Operations.Negotiate.Input) async throws -> Operations.Negotiate.Output
         = { _ in throw NotStubbed(operationID: "negotiate") }
     public var getCurrentTemperaturesHandler: @Sendable (Operations.GetCurrentTemperatures.Input) async throws -> Operations.GetCurrentTemperatures.Output
@@ -83,6 +85,10 @@ extension StubAPI {
 
     public func stopCook(_ input: Operations.StopCook.Input) async throws -> Operations.StopCook.Output {
         try await stopCookHandler(input)
+    }
+
+    public func updateCookTargets(_ input: Operations.UpdateCookTargets.Input) async throws -> Operations.UpdateCookTargets.Output {
+        try await updateCookTargetsHandler(input)
     }
 
     public func negotiate(_ input: Operations.Negotiate.Input) async throws -> Operations.Negotiate.Output {
@@ -160,7 +166,7 @@ extension StubAPI {
 
     /// The stub the app runs on in UI test mode: `GET /users/me` answers
     /// `uiTestUserName`; the device routes are served by a `StubDevices` and
-    /// the cook routes (list, start, get, stop, chart) by a `StubCooks`, both with
+    /// the cook routes (list, start, get, stop, targets, chart) by a `StubCooks`, both with
     /// timestamps from `now`. Every other operation is not stubbed (the app
     /// runs on `uiTestWithLive(clock:)`, which adds the live routes).
     public static func uiTest(now: @escaping @Sendable () -> Date = { UITestMode.fixedNow }) -> StubAPI {
@@ -195,6 +201,7 @@ extension StubAPI {
         api.startCookHandler = { input in await cooks.start(input) }
         api.getCookHandler = { input in await cooks.get(input) }
         api.stopCookHandler = { input in await cooks.stop(input) }
+        api.updateCookTargetsHandler = { input in await cooks.updateTargets(input) }
         api.getCookChartHandler = { input in await cooks.chart(input) }
         return (api, cooks)
     }

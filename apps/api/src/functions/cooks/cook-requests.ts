@@ -109,6 +109,25 @@ function targetTemps(value: unknown): Validated<TargetTemperatures> {
   return { ok: true, value: temps as TargetTemperatures };
 }
 
+/**
+ * #240: the PUT /cooks/{cookId}/targets body, `{ targetTemps }`. The targets
+ * are the cook's whole set after the save: a channel left out is cleared, and
+ * `{}` clears them all. Each target has the limits of POST /cooks.
+ */
+export function validateCookTargets(body: unknown): Validated<TargetTemperatures> {
+  if (!isPlainObject(body)) {
+    return fail('Request body must be a JSON object');
+  }
+  const extra = Object.keys(body).find(key => key !== 'targetTemps');
+  if (extra !== undefined) {
+    return fail(`${extra} is not a targets field`);
+  }
+  if (body['targetTemps'] === undefined) {
+    return fail('targetTemps is required: send {} to clear every target');
+  }
+  return targetTemps(body['targetTemps']);
+}
+
 /** POST /cooks body → a start request, or a 400 message naming the field. */
 export function validateStartCook(body: unknown): Validated<ValidStartCook> {
   if (!isPlainObject(body)) {

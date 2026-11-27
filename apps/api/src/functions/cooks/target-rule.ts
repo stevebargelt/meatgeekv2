@@ -58,6 +58,35 @@ function isNewer(timestamp: string, than: string | undefined): boolean {
 }
 
 /**
+ * #240: the state after the targets change from `before` to `after`. A channel
+ * whose target changed to a different value, was added or was cleared RE-ARMS:
+ * it loses its reached mark and any reading pending under the old target, so a
+ * new target already met is reached on the next two readings. A channel whose
+ * target is saved with the value it has keeps its state. Returns the same
+ * object when nothing changed.
+ */
+export function retarget(
+  state: TargetState,
+  before: TargetTemperatures | undefined,
+  after: TargetTemperatures
+): TargetState {
+  const reached: TargetsReached = { ...state.targetsReached };
+  const pending: TargetsPending = { ...state.targetsPending };
+  let changed = false;
+  for (const { channel } of CHANNELS) {
+    if (before?.[channel] === after[channel]) {
+      continue;
+    }
+    if (reached[channel] !== undefined || pending[channel] !== undefined) {
+      delete reached[channel];
+      delete pending[channel];
+      changed = true;
+    }
+  }
+  return changed ? { targetsReached: reached, targetsPending: pending } : state;
+}
+
+/**
  * The state after `readings`, or the same object when nothing changed (so the
  * caller can skip the write). Does not mutate its arguments.
  */

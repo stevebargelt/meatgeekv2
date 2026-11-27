@@ -151,6 +151,48 @@ public actor StubCooks {
         return .ok(.init(body: .json(cooks[index])))
     }
 
+    /// `PUT /cooks/{cookId}/targets`: the body's targets replace the cook's,
+    /// and a channel whose target changed loses its reached mark, as the API
+    /// does. A cook that is not running is 409 COOK_NOT_ACTIVE.
+    public func updateTargets(_ input: Operations.UpdateCookTargets.Input) -> Operations.UpdateCookTargets.Output {
+        guard case .json(let request) = input.body else { return .undocumented(statusCode: 415, .init()) }
+        guard let index = cooks.firstIndex(where: { $0.id == input.path.cookId }) else {
+            return .notFound(.init(body: .json(error(.notFound, "Cook not found"))))
+        }
+        guard cooks[index].status == .active else {
+            return .conflict(.init(body: .json(error(.cookNotActive, "Targets can be changed only on a running cook"))))
+        }
+        let new = request.targetTemps
+        let targets = Components.Schemas.TargetTemperatures(
+            grill: new.grill, probe1: new.probe1, probe2: new.probe2, probe3: new.probe3, probe4: new.probe4
+        )
+        let old = cooks[index].targetTemps
+        if var reached = cooks[index].targetsReached {
+            for key in TargetKey.allCases where key.value(in: old) != key.value(in: targets) {
+                switch key {
+                case .grill: reached.grill = nil
+                case .probe1: reached.probe1 = nil
+                case .probe2: reached.probe2 = nil
+                case .probe3: reached.probe3 = nil
+                case .probe4: reached.probe4 = nil
+                }
+            }
+            let none = TargetKey.allCases.allSatisfy { key in
+                switch key {
+                case .grill: reached.grill == nil
+                case .probe1: reached.probe1 == nil
+                case .probe2: reached.probe2 == nil
+                case .probe3: reached.probe3 == nil
+                case .probe4: reached.probe4 == nil
+                }
+            }
+            cooks[index].targetsReached = none ? nil : reached
+        }
+        let any = TargetKey.allCases.contains { $0.value(in: targets) != nil }
+        cooks[index].targetTemps = any ? targets : nil
+        return .ok(.init(body: .json(cooks[index])))
+    }
+
     /// `GET /cooks/{cookId}/chart`.
     public func chart(_ input: Operations.GetCookChart.Input) -> Operations.GetCookChart.Output {
         let id = input.path.cookId

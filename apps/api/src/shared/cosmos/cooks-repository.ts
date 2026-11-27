@@ -65,6 +65,16 @@ export interface StoredCookDocument extends Cook {
 /** What {@link CooksRepository.updateActiveCook} did. */
 export type ActiveCookUpdate = 'updated' | 'unchanged' | 'notActive';
 
+/** What {@link CooksRepository.updateActiveCook} answers: the cook as it is
+ *  after the call, unless it was not active. */
+export type ActiveCookUpdateResult =
+  | { readonly outcome: 'notActive'; readonly requestCharge: number }
+  | {
+      readonly outcome: 'updated' | 'unchanged';
+      readonly cook: Cook;
+      readonly requestCharge: number;
+    };
+
 /** Read-then-replace attempts {@link CooksRepository.updateActiveCook} makes
  *  when another writer keeps changing the cook between its read and its write. */
 export const UPDATE_ACTIVE_COOK_MAX_ATTEMPTS = 3;
@@ -605,10 +615,10 @@ export class CooksRepository {
   }
 
   /**
-   * Changes a RUNNING cook (status `active`) in place, for a writer that is not
-   * the cook's owner acting through a route: the target rule. `change` gets the
-   * whole stored document, stored-only fields included, and returns the fields
-   * to set, or `undefined` to write nothing.
+   * Changes a RUNNING cook (status `active`) in place: the target rule, and
+   * the owner changing targets (#240). `change` gets the whole stored
+   * document, stored-only fields included, and returns the fields to set
+   * (`undefined` removes one), or `undefined` to write nothing.
    *
    * The replace carries If-Match on the ETag just read, so it can never undo a
    * concurrent stop or another change: on 412 the cook is read again and
@@ -620,7 +630,7 @@ export class CooksRepository {
     userId: string,
     id: string,
     change: (cook: StoredCookDocument) => Partial<StoredCookDocument> | undefined
-  ): Promise<{ readonly outcome: ActiveCookUpdate; readonly requestCharge: number }> {
+  ): Promise<ActiveCookUpdateResult> {
     let requestCharge = 0;
     for (let attempt = 1; ; attempt++) {
       const existing = await this.readCookWithEtag(userId, id);
@@ -631,14 +641,16 @@ export class CooksRepository {
       }
       const fields = change(document);
       if (fields === undefined) {
-        return { outcome: 'unchanged', requestCharge };
+        return { outcome: 'unchanged', cook: toCook(document), requestCharge };
       }
+      // A field set to `undefined` is removed: JSON drops it on the write.
+      const next: StoredCookDocument = { ...document, ...fields };
       try {
         const response = await this.container
           .item(id, userId)
-          .replace<StoredCookDocument>({ ...document, ...fields }, ifMatch(existing.etag));
+          .replace<StoredCookDocument>(next, ifMatch(existing.etag));
         requestCharge += response.requestCharge;
-        return { outcome: 'updated', requestCharge };
+        return { outcome: 'updated', cook: toCook(response.resource ?? next), requestCharge };
       } catch (error) {
         if (statusCodeOf(error) === 412 && attempt < UPDATE_ACTIVE_COOK_MAX_ATTEMPTS) {
           continue;

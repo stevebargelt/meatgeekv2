@@ -17,6 +17,7 @@ import { getCookChartHandler } from './functions/cooks/get-cook-chart';
 import { getCooksHandler } from './functions/cooks/list-cooks';
 import { startCookHandler } from './functions/cooks/start-cook';
 import { stopCookHandler } from './functions/cooks/stop-cook';
+import { updateCookTargetsHandler } from './functions/cooks/update-cook-targets';
 import { negotiateHandler } from './functions/signalr/negotiate';
 import { signalROutput } from './functions/signalr/envelope';
 import {
@@ -89,6 +90,16 @@ app.http('stopCook', {
   route: 'cooks/{cookId}/stop',
   extraOutputs: [signalROutput],
   handler: stopCookHandler,
+});
+
+// #240: set, change and clear the targets of one of the caller's running
+// cooks. A changed target re-arms its channel. No SignalR output: an open cook
+// screen reads the cook again.
+app.http('updateCookTargets', {
+  methods: ['PUT'],
+  authLevel: 'anonymous',
+  route: 'cooks/{cookId}/targets',
+  handler: updateCookTargetsHandler,
 });
 
 // SignalR client negotiate endpoint.

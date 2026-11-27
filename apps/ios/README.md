@@ -524,6 +524,15 @@ SignalR (HAR-167). It ports the web app's `apps/web/src/live`: `hub.ts`,
   time; readings during it cost one more. A failed re-read changes nothing,
   and one answered after the cook was shown again (stopped, reloaded) is
   dropped.
+- **Changing targets** (#240): a running cook's screen has "Edit targets",
+  a sheet with the grill and the four probes filled from the cook, checked
+  with the start form's messages (`EditTargetsModel`,
+  `CookValidation.validateTargets`). Save sends the whole set to
+  `PUT /cooks/{cookId}/targets`; a blank field clears its target. The saved
+  cook replaces the shown one at once, live panel included. A second phone
+  with the cook open sees the change on its next re-read, which the next
+  pushed reading starts. 409 `COOK_NOT_ACTIVE` says the cook has ended and
+  reads it again. An ended cook offers no editing.
 - **Foreground and background**: the panel is connected only while the cook
   screen shows and the scene is active. Leaving `.active` stops the
   connection; coming back negotiates again, starts a new one and backfills.
@@ -545,7 +554,10 @@ Reconnect now, Advance clock 3 min (the reading goes stale), and Send
 cook_stopped (stops the cook as another client would).
 `testStartCookListOpenStop` drives push → drop → "Reconnecting…" → reconnect →
 a new reading → stale, and sees the probe 1 target set on the start form
-beside its reading; `testCookStoppedEndsTheLiveCook` drives `cook_stopped`.
+beside its reading, then changes it to 165 °F with Edit targets and sees the
+new target on the live panel; `testCookStoppedEndsTheLiveCook` drives
+`cook_stopped`. `StubCooks` serves `PUT /cooks/{cookId}/targets` as the API
+does (409 on an ended cook, a changed target loses its reached mark).
 The stub runs no target rule, so no reached mark shows in UI test mode; the
 marks are unit tested.
 
