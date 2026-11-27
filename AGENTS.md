@@ -79,7 +79,7 @@ xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' -skipPackagePluginValidation
 ```
 
-Add `-only-testing:MeatGeekKitTests` for one target. CI also fails if any of the four test targets ran zero tests.
+Add `-only-testing:MeatGeekKitTests` for one target. CI also fails if any of the five test targets ran zero tests.
 
 Other CI checks (`test-repeat.yml` runs each suite a pull request touches 50 times; the last line is that, locally):
 

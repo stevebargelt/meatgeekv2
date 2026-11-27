@@ -370,7 +370,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$counts"
           code=0
-          for target in MeatGeekKitTests MeatGeekLiveTests MeatGeekMSALTests MeatGeekUITests; do
+          for target in MeatGeekKitTests MeatGeekLiveTests MeatGeekActivityTests MeatGeekMSALTests MeatGeekUITests; do
             n="$(printf '%s\n' "$counts" | awk -F'\t' -v t="$target" '$1 == t { print $3 }')"
             if [ -z "$n" ] || [ "$n" -eq 0 ]; then
               echo "::error::$target ran no tests."
