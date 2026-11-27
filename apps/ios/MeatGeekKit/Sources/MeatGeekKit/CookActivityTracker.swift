@@ -148,11 +148,14 @@ public final class CookActivityTracker {
             }
         case .cook(let cook) where cook.status != .active:
             if let current = tracked[cook.id], current.activityID == activity.id {
+                // Stopped while the app was away: the lists still show it
+                // running, as after a `cook_stopped`.
                 cookChanged(cook)
+                onCookStopped(cook)
             } else {
+                // From an earlier launch: this launch's lists read it already.
                 end(activity.id, content(Tracked(activityID: activity.id, cook: cook)))
             }
-            onCookStopped(cook)
         case .cook(let cook):
             if let current = tracked[cook.id] {
                 // A second activity for a cook that already has one.
