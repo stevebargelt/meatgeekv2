@@ -29,9 +29,15 @@ public final class SessionModel {
     public nonisolated static let sessionEndedMessage = "Your session ended. Sign in again."
 
     public private(set) var state: State
+    /// How many times the session has become signed in. Tells one sign-in
+    /// from the next, even for the same account.
+    @ObservationIgnored public private(set) var signIns = 0
 
     @ObservationIgnored private let tokenProvider: (any TokenProvider)?
     @ObservationIgnored private let api: (any APIProtocol)?
+    /// Runs at the start of `signOut()`, while the session can still call
+    /// the API: `NotificationsModel` removes this phone's push token here.
+    @ObservationIgnored public var beforeSignOut: (@MainActor () async -> Void)?
 
     /// A session that signs in with `tokenProvider` and calls `api`. Starts in
     /// `.signingIn` until `restore()` has looked for a cached account.
@@ -71,7 +77,7 @@ public final class SessionModel {
         }
         do {
             _ = try await tokenProvider.accessToken()
-            state = .signedIn(account)
+            signedIn(account)
         } catch {
             if Self.endsSession(error) {
                 state = .signedOut(message: Self.sessionEndedMessage)
@@ -86,7 +92,7 @@ public final class SessionModel {
         guard let tokenProvider, state != .signingIn else { return }
         state = .signingIn
         do {
-            state = .signedIn(try await tokenProvider.signIn())
+            signedIn(try await tokenProvider.signIn())
         } catch TokenProviderError.cancelled {
             state = .signedOut(message: nil)
         } catch {
@@ -94,9 +100,17 @@ public final class SessionModel {
         }
     }
 
-    /// Forgets the account and its tokens.
+    private func signedIn(_ account: SignedInAccount) {
+        signIns += 1
+        state = .signedIn(account)
+    }
+
+    /// Forgets the account and its tokens, after `beforeSignOut`.
     public func signOut() async {
         guard let tokenProvider else { return }
+        if case .signedIn = state, let beforeSignOut {
+            await beforeSignOut()
+        }
         // Signed out either way: a cache that cannot be cleared must not keep
         // the user on a signed-in screen.
         try? await tokenProvider.signOut()

@@ -113,8 +113,8 @@ to main, serves production`" .-> Meatgeek.Web
   class Vercel,Smoker,Apns,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Web,Meatgeek.Mobile primary
-  linkStyle 0,1,2,3,4,6,7,8,9,10,12,14,15,16,17,18,19,20,21,22,23,24 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 5,13 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,6,7,8,9,10,12,13,14,15,16,17,18,19,20,21,22,23,24 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 5 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 11 stroke:#8D8D8D
 ```
 
@@ -252,9 +252,9 @@ $.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   class Meatgeek.Cloud.Keyvault,Meatgeek.Cloud.Observability.Collector amber
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
-  linkStyle 0,1,3,4,5,6,7,8,9,12,13,14,15,17,18,19,20,21,23,25,27,30,31,36,39,40,41,42,43,44,45,46,47,48,49,50,52,53,54,55,56 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 2,16 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,12,13,14,15,17,18,19,20,21,23,25,27,30,31,36,39,40,41,42,43,44,45,46,47,48,49,50,52,53,54,55,56 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 10,11,28,29,32,37,38,51 stroke:#8D8D8D
+  linkStyle 16 stroke:#0ea5e9,stroke-dasharray:8 4
   linkStyle 22,24,26,33,34,35,57 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -313,6 +313,7 @@ graph TB
   end
   subgraph MeatgeekMobile["`iOS app`"]
     MeatgeekMobile.LivePanel@{ shape: rectangle, label: "live panel" }
+    MeatgeekMobile.Alerts@{ shape: rectangle, label: "alerts" }
     MeatgeekMobile.Chart@{ shape: rectangle, label: "chart" }
   end
   Operator -. "`imports the APNs key, sign only`" .-> MeatgeekCloud.Keyvault
@@ -357,6 +358,7 @@ of the owner's phones`" .-> Apns
   MeatgeekMobile.LivePanel -. "`POST /negotiate`" .-> MeatgeekCloud.Api.Negotiate
   MeatgeekMobile.LivePanel -. "`pushed readings`" .-> MeatgeekMobile.Chart
   MeatgeekMobile.Chart -. "`GET /cooks/{cookId}/chart`" .-> MeatgeekCloud.Api.Cooks
+  Apns -. "`Time Sensitive target alert`" .-> MeatgeekMobile.Alerts
   Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
 <sim>-web or <sim>-ios:
 messageId, $.ct=application/json,
@@ -366,21 +368,20 @@ provider token (ES256)`" .-> MeatgeekCloud.Keyvault
   MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
-  Apns -. "`Time Sensitive target alert`" .-> MeatgeekMobile
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class Entra,MeatgeekCloud.Deviceupdate,Apns muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.LogAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
-  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekCloud.Api.Targets,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
+  class MeatgeekCloud.Api.Rollup,Delivery.Simdevice,MeatgeekCloud.Api.Negotiate,MeatgeekCloud.Api.Cooks,MeatgeekCloud.Api.Broadcast,MeatgeekCloud.Api.Targets,MeatgeekEdge.PusherTwin,MeatgeekWeb.LivePanel,MeatgeekMobile.LivePanel,MeatgeekMobile.Alerts,MeatgeekWeb.Chart,MeatgeekMobile.Chart primary
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloud.Data.TemperatureRollups green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Keyvault,MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,43 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,26,27,28,29,30,31,32,33,34,35,36,37,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,40,41,42,43 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,13 stroke:#8D8D8D
-  linkStyle 3,18,21,23,38 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 3,18,21,23,39 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ---
@@ -526,6 +527,9 @@ DELETE /devices/{id}`" .-> MeatgeekCloudApi.Devices
   MeatgeekMobile -. "`GET
 /temperatures/current/{deviceId}
 (backfill)`" .-> MeatgeekCloudApi.Temperatures
+  MeatgeekMobile -. "`POST /users/me/push-tokens;
+DELETE /users/me/push-
+tokens/{tokenId}`" .-> MeatgeekCloudApi.Users
   MeatgeekMobile -. "`POST /negotiate`" .-> MeatgeekCloudApi.Negotiate
   MeatgeekWeb -. "`[...]`" .-> MeatgeekCloudApi.Cooks
   MeatgeekWeb -. "`GET /devices; POST
@@ -614,9 +618,8 @@ provider token (ES256)`" .-> MeatgeekCloudKeyvault
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.TemperatureRollups,MeatgeekCloudData.Leases,MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,31,32,33,34,35,36,37,38,39,40,41,42,44,45,46,47,48,49,50,51,53,55,56,61,62,63 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 30,43,54,57,58,59,60 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 52 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,32,33,34,35,36,37,38,39,40,41,42,43,45,46,47,48,49,50,51,52,53,54,56,57,62,63,64 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 31,44,55,58,59,60,61 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## Cosmos DB

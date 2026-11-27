@@ -5,6 +5,8 @@ import SwiftUI
 
 @main
 struct MeatGeekApp: App {
+    /// The APNs token and the notification center's delegate (SystemNotifications.swift).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var root = RootModel(
         appVersion: AppVersion(infoDictionary: Bundle.main.infoDictionary)
     )
@@ -12,7 +14,7 @@ struct MeatGeekApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(root: root, session: app.session, now: app.now, live: app.live)
+            RootView(root: root, session: app.session, now: app.now, live: app.live, notifications: app.notifications)
                 // MSAL's own URLs, if any. Sign-in uses the system browser
                 // (ASWebAuthenticationSession), which hands MSAL its redirect
                 // itself, and never the Authenticator broker (HAR-171), so
@@ -23,15 +25,17 @@ struct MeatGeekApp: App {
     }
 }
 
-/// The session, the clock and the live services the app runs on.
+/// The session, the clock, the live services and alerts the app runs on.
 struct AppServices {
     let session: SessionModel
     let now: @Sendable () -> Date
     let live: LiveServices
+    let notifications: NotificationsModel
 }
 
 /// Builds the app's session from its Info.plist config, with the real clock
-/// and the SignalR hub, or everything from the fakes in UI test mode
+/// the SignalR hub and the system's notifications, or everything from the
+/// fakes in UI test mode
 /// (`MEATGEEK_UI_TEST=1`, see `UITestMode`).
 enum AppComposition {
     @MainActor
@@ -41,12 +45,14 @@ enum AppComposition {
     ) -> AppServices {
         if UITestMode.isEnabled(environment) {
             let app = UITestMode.makeApp(environment: environment)
-            return AppServices(session: app.session, now: app.now, live: app.live)
+            return AppServices(session: app.session, now: app.now, live: app.live, notifications: app.notifications)
         }
+        let session = makeSession(bundle: bundle)
         return AppServices(
-            session: makeSession(bundle: bundle),
+            session: session,
             now: { Date() },
-            live: LiveServices(createHub: SignalRLiveHub.factory)
+            live: LiveServices(createHub: SignalRLiveHub.factory),
+            notifications: NotificationsModel(port: SystemNotifications.shared, session: session, defaults: .standard)
         )
     }
 

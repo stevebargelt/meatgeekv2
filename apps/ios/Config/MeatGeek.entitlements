@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The MeatGeek app's capabilities (#245). CODE_SIGN_ENTITLEMENTS points here
+  from the MeatGeek target.
+
+  - aps-environment: Push Notifications, on the APNs sandbox ("development"),
+    which is what the dev API sends to. A production build would say
+    "production"; there is none yet.
+  - com.apple.developer.usernotifications.time-sensitive: Time Sensitive
+    Notifications, so the API's target alerts break through Focus.
+
+  Both need the paid Apple Developer Program for a device build: automatic
+  signing adds them to the com.meatgeek.ios App ID. A simulator build is
+  signed "to run locally" and needs no team and no account.
+-->
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>development</string>
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
+</dict>
+</plist>

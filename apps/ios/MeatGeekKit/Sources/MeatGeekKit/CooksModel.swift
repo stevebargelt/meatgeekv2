@@ -48,16 +48,25 @@ public final class CooksModel {
     @ObservationIgnored public let now: @Sendable () -> Date
     /// What an active cook's live panel connects with; nil: no live panel.
     @ObservationIgnored public let live: LiveServices?
+    /// Alerts on this phone: a running cook's screen asks for permission and
+    /// says when alerts are off. Nil: no alerts (some tests).
+    @ObservationIgnored public let notifications: NotificationsModel?
     @ObservationIgnored private var started = false
     /// Bumped on every reload, so a page that arrives for an old filter is
     /// dropped instead of shown or appended.
     @ObservationIgnored private var generation = 0
 
-    public init(devices: DevicesModel, now: @escaping @Sendable () -> Date = { Date() }, live: LiveServices? = nil) {
+    public init(
+        devices: DevicesModel,
+        now: @escaping @Sendable () -> Date = { Date() },
+        live: LiveServices? = nil,
+        notifications: NotificationsModel? = nil
+    ) {
         self.session = devices.session
         self.devices = devices
         self.now = now
         self.live = live
+        self.notifications = notifications
     }
 
     /// The first time the tab shows: page one. Later calls do nothing.

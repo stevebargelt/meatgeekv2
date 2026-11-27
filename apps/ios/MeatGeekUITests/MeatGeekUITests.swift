@@ -35,6 +35,8 @@ final class MeatGeekUITests: XCTestCase {
         static let cookDetailEnded = "cookDetail.ended"
         static let cookDetailStop = "cookDetail.stop"
         static let cookDetailEditTargets = "cookDetail.editTargets"
+        static let cookDetailAlertsOff = "cookDetail.alertsOff"
+        static let cookDetailOpenSettings = "cookDetail.openSettings"
         static func editTarget(_ key: String) -> String { "editTargets.target.\(key)" }
         static let editTargetsSave = "editTargets.save"
         static let chart = "chart.chart"
@@ -563,6 +565,52 @@ final class MeatGeekUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
         XCTAssertFalse(app.staticTexts[ID.liveBadge].exists, "the live panel is still shown")
         XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
+    }
+
+    /// Notification permission declined (`StubNotifications`,
+    /// MEATGEEK_UI_TEST_NOTIFICATIONS=denied): a running cook's screen says
+    /// alerts are off and links to Settings.
+    @MainActor
+    func testDeclinedAlertsSayOffOnTheCookScreen() throws {
+        let app = launchInTestMode(["MEATGEEK_UI_TEST_NOTIFICATIONS": "denied"])
+        signIn(app)
+        openTab(app, "Devices")
+        let row = app.buttons[ID.deviceRow(Stub.connectedID)]
+        waitUntilExists(row, "the connected device's row")
+        row.tap()
+        let start = app.buttons[ID.detailStartCook]
+        waitUntilExists(start, "Start cook on the device detail screen")
+        start.tap()
+        let name = app.textFields[ID.startName]
+        waitUntilExists(name, "the start cook form")
+        name.tap()
+        name.typeText("No Alerts")
+        let meatType = app.textFields[ID.startMeatType]
+        meatType.tap()
+        meatType.typeText("pork")
+        app.buttons[ID.startSubmit].tap()
+
+        let off = app.staticTexts[ID.cookDetailAlertsOff]
+        scrollUntilExists(app, off, "the alerts-off notice")
+        XCTAssertTrue(off.label.hasPrefix("Alerts are off."), off.label)
+        XCTAssertTrue(app.buttons[ID.cookDetailOpenSettings].exists, "no link to Settings")
+        screenshot(app, "alerts-off")
+    }
+
+    /// A tapped alert that launched the app (`StubNotifications`,
+    /// MEATGEEK_UI_TEST_TAPPED_ALERT) opens its cook once signed in.
+    @MainActor
+    func testTappedAlertOpensItsCook() throws {
+        let app = launchInTestMode(["MEATGEEK_UI_TEST_TAPPED_ALERT": "seeded-cook-1"])
+        // Not `signIn(app)`: the cook's screen opens at once, over the list
+        // whose navigation bar has the account menu.
+        let signIn = app.buttons[ID.signIn]
+        waitUntilExists(signIn, "the Sign in with Microsoft button")
+        signIn.tap()
+        let status = app.staticTexts[ID.cookDetailStatus]
+        waitUntilExists(status, "the tapped alert's cook")
+        XCTAssertEqual(status.label, "Status, Completed")
+        XCTAssertTrue(app.navigationBars[Stub.newestSeededCookName].exists, "not the tapped alert's cook")
     }
 
     @MainActor
