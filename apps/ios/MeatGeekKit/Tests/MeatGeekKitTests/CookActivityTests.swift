@@ -164,6 +164,8 @@ final class ActivityHarness {
     /// while `apiFails` is set.
     let apiCook = Box<Cook?>(nil)
     let apiFails = Box(false)
+    /// When set, `GET /cooks/{id}` waits at it before answering.
+    let readGate = Box<Gate?>(nil)
     /// How many times `GET /cooks/{id}` was called.
     let reads = Box(0)
     private(set) var session: SessionModel!
@@ -176,9 +178,10 @@ final class ActivityHarness {
             negotiations.value += 1
             return .ok(.init(body: .json(LiveFixtures.info(negotiations.value))))
         }
-        let apiCook = self.apiCook, apiFails = self.apiFails, reads = self.reads
+        let apiCook = self.apiCook, apiFails = self.apiFails, reads = self.reads, readGate = self.readGate
         api.getCookHandler = { _ in
             reads.value += 1
+            await readGate.value?.pass()
             if apiFails.value {
                 return .internalServerError(.init(body: .json(CookFixtures.error(.internalServerError, "Down"))))
             }
@@ -433,10 +436,50 @@ struct CookActivityTrackerTests {
         h.tracker.setAppActive(true)
         await until("the cook was read") { h.reads.value == before + 1 }
         await until("a second hub started") { h.hubs.hubs.count == 2 && h.hubs.latest?.starts == 1 }
-        // Let the read's answer reach the tracker; the activity stays.
-        for _ in 0..<20 { await Task.yield() }
+        await until("the read's answer reached the tracker") { !h.tracker.isReconciling }
         #expect(h.port.calls == [.start(cookID: "cook-1")])
         #expect(h.tracker.trackedCookIDs == ["cook-1"])
+    }
+
+    @Test("stopping a cook in the app ends an earlier launch's activity the failed check left alone")
+    func stopEndsUnadopted() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        h.port.shown = [.init(id: "earlier", cookID: "cook-1")]
+        h.apiFails.value = true
+        h.tracker.setAppActive(true)
+        await until("the check finished") { h.reads.value == 1 && !h.tracker.isReconciling }
+        #expect(h.port.calls.isEmpty)
+        #expect(h.tracker.trackedCookIDs.isEmpty)
+
+        h.cooks.apply(Self.stopped(Self.active()))
+        #expect(h.port.calls == [.end(id: "earlier")])
+        #expect(h.port.states["earlier"]?.targetTemps == .init(grill: 225, probe1: 203))
+    }
+
+    @Test("after stop (signed out) a check still out, a late cook and the scene take over, start and connect nothing")
+    func stopIsFinal() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        h.port.shown = [.init(id: "earlier", cookID: "cook-1")]
+        h.apiCook.value = Self.active()
+        let gate = Gate()
+        h.readGate.value = gate
+        h.tracker.setAppActive(true)
+        await gate.waitUntilEntered()
+        h.tracker.stop()
+
+        h.cooks.apply(Self.active("cook-2"))
+        h.tracker.setAppActive(false)
+        h.tracker.setAppActive(true)
+        gate.open()
+        await until("the dropped check's read came back") { !h.tracker.isReconciling }
+        #expect(h.reads.value == 1)
+        #expect(h.port.calls.isEmpty)
+        #expect(h.tracker.trackedCookIDs.isEmpty)
+        #expect(!h.tracker.isConnected)
+        #expect(h.hubs.hubs.isEmpty)
+        #expect(h.negotiations.value == 0)
     }
 
     @Test("with no live services (UI test mode) the activity starts and ends but opens no connection")

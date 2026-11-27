@@ -42,6 +42,9 @@ public final class CookActivityTracker {
     /// Activities the tracker has ended, so a check that read their cook
     /// before they ended does not take them over again.
     private var ended: Set<String> = []
+    /// `stop()` was called (signed out): nothing is taken over, started or
+    /// followed after it.
+    private var stopped = false
 
     /// A `cook_stopped` for a tracked cook arrived on the tracker's connection.
     public var onCookStopped: @MainActor (Cook) -> Void = { _ in }
@@ -66,8 +69,13 @@ public final class CookActivityTracker {
     /// Whether the tracker's own live connection is open (or retrying).
     public var isConnected: Bool { connection != nil }
 
+    /// Whether the check of the shown activities is still out (after
+    /// `stop()`, until its dropped read has come back).
+    public var isReconciling: Bool { reconciling != nil }
+
     /// A cook was started, stopped or changed in the app.
     public func cookChanged(_ cook: Cook) {
+        guard !stopped else { return }
         if cook.status == .active {
             if var current = tracked[cook.id] {
                 current.cook = cook
@@ -80,6 +88,11 @@ public final class CookActivityTracker {
             var ended = current
             ended.cook = cook
             end(current.activityID, content(ended))
+        } else {
+            // Not taken over yet (an earlier launch's, whose check failed).
+            for shown in activities.running() where shown.cookID == cook.id {
+                end(shown.id, content(Tracked(activityID: shown.id, cook: cook)))
+            }
         }
         updateConnection()
     }
@@ -88,6 +101,7 @@ public final class CookActivityTracker {
     /// active. Each time the app becomes active, every activity the system
     /// shows is checked against its cook (see `reconcile()`).
     public func setAppActive(_ active: Bool) {
+        guard !stopped else { return }
         appActive = active
         updateConnection()
         if active { reconcile() }
@@ -106,6 +120,7 @@ public final class CookActivityTracker {
         reconciling = Task { [weak self, session] in
             for activity in shown {
                 let found = await Self.read(activity.cookID, session)
+                guard !Task.isCancelled else { break }
                 self?.reconciled(activity, found)
             }
             self?.reconciling = nil
@@ -133,8 +148,9 @@ public final class CookActivityTracker {
     }
 
     private func reconciled(_ activity: RunningCookActivity, _ found: Found) {
-        // Ended in the meantime (by the app, while the read was out).
-        guard !ended.contains(activity.id) else { return }
+        // Ended in the meantime (by the app, while the read was out), or
+        // signed out.
+        guard !stopped, !ended.contains(activity.id) else { return }
         switch found {
         case .unknown:
             return
@@ -176,8 +192,16 @@ public final class CookActivityTracker {
         activities.end(activityID, state)
     }
 
-    /// Stops following readings. The activities stay.
+    /// Signed out: stops following readings, for good. A check still out is
+    /// dropped, and later calls take over, start and end nothing. The
+    /// activities stay.
     public func stop() {
+        stopped = true
+        reconciling?.cancel()
+        closeConnection()
+    }
+
+    private func closeConnection() {
         connection?.stop()
         connection = nil
     }
@@ -201,7 +225,7 @@ public final class CookActivityTracker {
         if wanted, connection == nil {
             open()
         } else if !wanted {
-            stop()
+            closeConnection()
         }
     }
 

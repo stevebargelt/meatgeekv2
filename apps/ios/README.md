@@ -62,7 +62,9 @@ apps/ios/
   (the account menu's name), the devices models (see [Devices](#devices)),
   the cooks models (see [Cooks](#cooks)), `LivePanelModel` (see
   [Live temperatures](#live-temperatures)) and `CookChartModel` (see
-  [Cook chart](#cook-chart)).
+  [Cook chart](#cook-chart)). `CookActivityTracker`, which the cooks model
+  owns, keeps the lock-screen activities (see
+  [Lock-screen activity](#lock-screen-activity)).
 - **Adding a file needs no project edit.** `MeatGeek/`, `MeatGeekUITests/`,
   `MeatGeekMSALTests/` and `MeatGeekLiveUITests/` are synchronized folders:
   drop a Swift file (or an asset) into the folder and it is part of the target. `project.pbxproj` only changes when you add a
@@ -604,7 +606,11 @@ issues of #237.
   activity the system shows: a running cook's activity is taken over and
   followed, and a stopped or missing cook's is ended, so an activity from an
   earlier launch keeps up and one for a cook stopped elsewhere while the app
-  was in the background goes. It never starts one there (#251 does).
+  was in the background goes. It never starts one there (#251 does). A
+  stopped cook also ends an activity the tracker had not taken over yet (an
+  earlier launch's whose read failed). Signing out stops the tracker for
+  good: a read still out is dropped, and it starts, takes over and follows
+  nothing after that; the activities themselves stay.
 - **The port** (`LiveActivities`, MeatGeekKit): `running`, `start`, `update`,
   `end`, and the token streams (`pushToStartTokens`, `pushTokens`). The app's
   is `ActivityKitLiveActivities` (MeatGeekActivity), local activities with no
