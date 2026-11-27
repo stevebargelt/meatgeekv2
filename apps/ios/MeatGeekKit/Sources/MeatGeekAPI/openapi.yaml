@@ -3713,3 +3713,36 @@ components:
           description: |
             The latest reading's `timestamp`, ISO-8601 UTC. Absent before the
             first reading.
+        targetsReached:
+          $ref: '#/components/schemas/CookActivityTargetsReached'
+        updatedAt:
+          type: string
+          description: |
+            When this content was sent, ISO-8601 UTC. The activity goes stale
+            three minutes after it, and then shows "as of" this time (#272).
+        ended:
+          type: boolean
+          description: |
+            The cook has stopped: the activity shows "Cook ended" with these last
+            temperatures, and leaves the lock screen 15 minutes after
+            `updatedAt`. Absent: the cook is running.
+    CookActivityTargetsReached:
+      type: object
+      description: |
+        The probes that have reached their current target (the cook's
+        `targetsReached`), each with the time it was reached, ISO-8601 UTC. The
+        grill is not here: the activity never shows it with a reached mark.
+      additionalProperties: false
+      properties:
+        probe1:
+          type: string
+          description: When probe 1 reached its target.
+        probe2:
+          type: string
+          description: When probe 2 reached its target.
+        probe3:
+          type: string
+          description: When probe 3 reached its target.
+        probe4:
+          type: string
+          description: When probe 4 reached its target.

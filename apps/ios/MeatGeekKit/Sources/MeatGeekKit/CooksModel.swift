@@ -78,7 +78,7 @@ public final class CooksModel {
         self.live = live
         self.notifications = notifications
         self.activities = activities.map { port in
-            CookActivityTracker(session: devices.session, activities: port, live: activityLive) { [weak devices] deviceID in
+            CookActivityTracker(session: devices.session, activities: port, live: activityLive, now: now) { [weak devices] deviceID in
                 devices?.device(id: deviceID)?.configuration?.temperatureUnit ?? .fahrenheit
             }
         }

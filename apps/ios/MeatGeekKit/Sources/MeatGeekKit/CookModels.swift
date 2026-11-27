@@ -410,6 +410,9 @@ public final class CookDetailModel {
             // The first time a running cook shows (also right after starting
             // one, which opens its screen): ask for alerts.
             cooks.notifications?.runningCookShown()
+            // Its lock-screen activity takes the targets and reached probes
+            // as read (#272).
+            cooks.activities?.cookRead(cook)
             if let live {
                 live.cookChanged(cook)
                 return

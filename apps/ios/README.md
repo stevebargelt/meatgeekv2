@@ -584,14 +584,15 @@ marks are unit tested.
 ## Lock-screen activity
 
 A cook started in the app shows on the lock screen as a Live Activity, kept
-current while the app runs, and ends when the cook stops (#271). Nothing here
-uses push, so it works in the simulator. Reached marks, the Dynamic Island and
-the stale and ended states are #272; starting and updating by push are later
-issues of #237.
+current while the app runs, and ends when the cook stops (#271), with reached
+marks, the Dynamic Island and the stale and ended states (#272). Nothing here
+uses push, so it works in the simulator; starting and updating by push are
+later issues of #237.
 
 - **Data.** The activity's attributes (`cookId`, `cookName`, `startTime`) and
   content state (the latest reading's grill and probes in °F, the cook's
-  targets, the device's unit, the reading's time) are the spec's
+  targets, the device's unit, the reading's time, the probes' reached times
+  (`targetsReached`), the update's send time (`updatedAt`) and `ended`) are the spec's
   `CookActivityAttributes` and `CookActivityContentState`
   (`libs/api-specs/spec/components/schemas/live-activity.yaml`), generated
   into `MeatGeekAPI` like every other type. `MeatGeekActivity` makes the
@@ -602,15 +603,33 @@ issues of #237.
   the elapsed time, ticking from the cook's start; the grill as reading
   against target (`224° / 225°`, `224°` with no target, `—` with no reading);
   and each probe that has a reading next to its target (`187° → 203°`). A
-  probe with no reading is left out. Whole degrees in the device's unit,
-  converted from °F as the live panel converts. The views
-  (`CookActivityLockScreenView`, MeatGeekActivity) take only the resulting
-  `CookActivityPresentation`.
+  probe with no reading is left out. A reached probe shows the mark and the
+  local time it was reached (`204° · 203° ✓ 3:42 PM`) until it re-arms; the
+  grill never shows a mark. Whole degrees in the device's unit, converted
+  from °F as the live panel converts.
+  - The **Dynamic Island** shows the probe closest to a target it has not
+    reached (a tie goes to the lower probe); when every shown probe with a
+    target has reached it, the most recently reached one with the mark and
+    no time (`204° ✓`); with no probe target, the grill.
+  - **Stale**: each update's stale date is three minutes after its
+    `updatedAt` (`CookActivityPresenter.staleDate`). When the system says it
+    has passed (`context.isStale`), the activity shows `as of 3:42 PM`, the
+    last update's time, in place of the elapsed time. It does not say why.
+  - **Ended**: a stopped (or missing) cook's activity ends showing `Cook
+    ended` with the last temperatures, stops ticking, and leaves the lock
+    screen 15 minutes after it ended (`CookActivityPresenter.dismissalDate`).
+
+  The views (`CookActivityLockScreenView` and the `CookActivityIsland*Views`,
+  MeatGeekActivity) take only the resulting `CookActivityPresentation`.
 - **When** (`CookActivityTracker`, MeatGeekKit, owned by `CooksModel`): every
   cook `CooksModel.apply(_:)` sees, which is every cook started, stopped or
   changed in the app. A running cook gets an activity (one the system already
   shows for it, from an earlier launch, is taken over); a changed target
-  updates it; a stopped cook ends it, at once. While it tracks an activity and
+  updates it; a stopped cook ends it, at once. The cook screen's re-read of a
+  running cook after each reading goes to `cookRead(_:)`, so the activity
+  takes the cook's reached probes as the server records them; with the cook
+  screen closed nothing re-reads the cook, so a mark waits for the cook screen
+to open again or for the server's updates by push (a later issue of #237). While it tracks an activity and
   the app is active, the tracker holds its own `LiveConnection`, separate from
   the cook screen's, and each `temperature` message from a tracked cook's
   device updates that activity; `cook_stopped` ends it. Each time the app
@@ -638,13 +657,13 @@ issues of #237.
   `@main` `MeatGeekWidgetsBundle` over `CookActivityWidget`. Its Info.plist
   keys are in `Config/MeatGeekWidgets-Info.plist`. The app's Info.plist sets
   `NSSupportsLiveActivities` and `NSSupportsLiveActivitiesFrequentUpdates`.
-  The Dynamic Island is a placeholder (cook name and grill) until #272.
 
 `CookActivityTests.swift` (MeatGeekKitTests) tests the text, the unit, the
+reached marks, the Dynamic Island's choice, the stale and ended states, the
 link and the tracker over the fake port, fake hubs and a virtual clock.
 `CookActivityViewTests.swift` (MeatGeekActivityTests) renders the lock-screen
-view from a presentation value with `ImageRenderer`, on CI's unsigned
-simulator build.
+and every Dynamic Island view, current, stale and ended, from presentation
+values with `ImageRenderer`, on CI's unsigned simulator build.
 
 ## Alerts
 

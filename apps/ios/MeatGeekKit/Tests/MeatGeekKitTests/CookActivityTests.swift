@@ -122,16 +122,173 @@ struct CookActivityPresenterTests {
         let attributes = CookActivityPresenter.attributes(for: cook)
         #expect(attributes == .init(cookId: "cook-1", cookName: "Brisket", startTime: "2026-11-22T18:00:00.000Z"))
 
-        let empty = CookActivityPresenter.content(for: cook, reading: nil, unit: .celsius)
-        #expect(empty == .init(targetTemps: .init(grill: 225, probe2: 203), temperatureUnit: .celsius))
+        let empty = CookActivityPresenter.content(for: cook, reading: nil, unit: .celsius, now: fixedNow)
+        #expect(empty == .init(
+            targetTemps: .init(grill: 225, probe2: 203), temperatureUnit: .celsius, updatedAt: "2026-11-22T18:00:00.000Z"
+        ))
 
         let reading = LiveReading(LiveFixtures.temperature(at: 5, grill: 224, probe1: 150, probe2: 180))
-        let state = CookActivityPresenter.content(for: cook, reading: reading, unit: .fahrenheit)
+        let state = CookActivityPresenter.content(for: cook, reading: reading, unit: .fahrenheit, now: fixedNow)
         #expect(state.grillTemp == 224)
         #expect(state.probe1Temp == 150)
         #expect(state.probe2Temp == 180)
         #expect(state.readingTime == LiveFixtures.iso(5))
         #expect(state.temperatureUnit == .fahrenheit)
+        #expect(state.ended == nil)
+    }
+
+    @Test("a cook's reached probes go into the content with their times; the grill's does not; a stopped cook is ended")
+    func reachedAndEndedFromCook() {
+        var cook = CookFixtures.cook("cook-1", status: .active, name: "Brisket", started: fixedNow)
+        cook.targetTemps = .init(grill: 225, probe1: 203, probe3: 165)
+        cook.targetsReached = .init(
+            grill: .init(reachedAt: fixedNow), probe1: .init(reachedAt: fixedNow.addingTimeInterval(60))
+        )
+        let state = CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow)
+        #expect(state.targetsReached == .init(probe1: "2026-11-22T18:01:00.000Z"))
+
+        cook.targetsReached = .init(grill: .init(reachedAt: fixedNow))
+        #expect(CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow).targetsReached == nil)
+
+        cook.status = .completed
+        #expect(CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow).ended == true)
+        #expect(CookActivityPresenter.gone(now: fixedNow) == .init(
+            temperatureUnit: .fahrenheit, updatedAt: "2026-11-22T18:00:00.000Z", ended: true
+        ))
+    }
+}
+
+// MARK: - Reached, the Dynamic Island, stale and ended (#272)
+
+@Suite("Lock-screen activity: reached marks, the Dynamic Island, stale and ended")
+struct CookActivityStatesTests {
+    static let attributes = CookActivityPresenterTests.attributes
+    static let utc = TimeZone(identifier: "UTC")!
+    static let enUS = Locale(identifier: "en_US")
+
+    /// 18:00:00 UTC on the test day, plus `seconds`.
+    static func iso(_ seconds: TimeInterval) -> String {
+        (try? APIDateTranscoder().encode(fixedNow.addingTimeInterval(seconds))) ?? ""
+    }
+
+    static func state(
+        grill: Double? = 224, probe1: Double? = nil, probe2: Double? = nil, probe3: Double? = nil, probe4: Double? = nil,
+        targets: Components.Schemas.TargetTemperatures? = nil,
+        reached: Components.Schemas.CookActivityTargetsReached? = nil,
+        updatedAt: String? = iso(0), ended: Bool? = nil, unit: TemperatureUnit = .fahrenheit
+    ) -> CookActivityContentState {
+        CookActivityContentState(
+            grillTemp: grill, probe1Temp: probe1, probe2Temp: probe2, probe3Temp: probe3, probe4Temp: probe4,
+            targetTemps: targets, temperatureUnit: unit, targetsReached: reached, updatedAt: updatedAt, ended: ended
+        )
+    }
+
+    static func present(_ state: CookActivityContentState, isStale: Bool = false) -> CookActivityPresentation {
+        CookActivityPresenter.present(attributes, state, isStale: isStale, locale: enUS, timeZone: utc)
+    }
+
+    @Test("a reached probe shows its reading, its target, the mark and the local time it was reached")
+    func reachedMark() {
+        let shown = Self.present(Self.state(
+            probe1: 204, probe2: 150, targets: .init(probe1: 203, probe2: 165), reached: .init(probe1: Self.iso(42 * 60))
+        ))
+        #expect(shown.probes == [
+            .init(label: "Probe 1", text: "204° · 203° ✓ 6:42\u{202F}PM"),
+            .init(label: "Probe 2", text: "150° → 165°"),
+        ])
+        let tokyo = CookActivityPresenter.present(
+            Self.attributes,
+            Self.state(probe1: 204, targets: .init(probe1: 203), reached: .init(probe1: Self.iso(42 * 60))),
+            locale: Self.enUS, timeZone: TimeZone(identifier: "Asia/Tokyo")!
+        )
+        #expect(tokyo.probes.first?.text == "204° · 203° ✓ 3:42\u{202F}AM")
+    }
+
+    @Test("a probe that re-armed (no longer reached) loses the mark; a reached probe with no target shows none")
+    func reArmed() {
+        #expect(Self.present(Self.state(probe1: 185, targets: .init(probe1: 203))).probes.first?.text == "185° → 203°")
+        #expect(Self.present(Self.state(probe1: 204, reached: .init(probe1: Self.iso(0)))).probes.first?.text == "204°")
+    }
+
+    @Test("the grill never shows a mark, even reached")
+    func grillNoMark() {
+        let shown = Self.present(Self.state(grill: 226, targets: .init(grill: 225)))
+        #expect(shown.grill == "226° / 225°")
+    }
+
+    @Test("the Dynamic Island shows the probe closest to a target it has not reached")
+    func islandClosest() {
+        let shown = Self.present(Self.state(
+            probe1: 204, probe2: 150, probe3: 190, probe4: 100,
+            targets: .init(grill: 225, probe1: 203, probe2: 165, probe3: 203),
+            reached: .init(probe1: Self.iso(0))
+        ))
+        #expect(shown.island == .init(label: "Probe 3", shortLabel: "P3", text: "190° → 203°"))
+    }
+
+    @Test("a probe at its target but not yet reached is the closest; a tie goes to the lower probe")
+    func islandAtTargetAndTie() {
+        let at = Self.present(Self.state(probe1: 190, probe2: 204, targets: .init(probe1: 203, probe2: 203)))
+        #expect(at.island.label == "Probe 2")
+        let tie = Self.present(Self.state(probe1: 193, probe2: 213, targets: .init(probe1: 203, probe2: 203)))
+        #expect(tie.island.label == "Probe 1")
+    }
+
+    @Test("with every probe's target reached, the most recently reached one, with the mark and no time")
+    func islandAllReached() {
+        let shown = Self.present(Self.state(
+            probe1: 204, probe2: 170, probe3: 120,
+            targets: .init(probe1: 203, probe2: 165),
+            reached: .init(probe1: Self.iso(60), probe2: Self.iso(600))
+        ))
+        #expect(shown.island == .init(label: "Probe 2", shortLabel: "P2", text: "170° ✓"))
+    }
+
+    @Test("with no targets, or targets only on probes with no reading, the grill")
+    func islandGrill() {
+        #expect(Self.present(Self.state(probe1: 150)).island == .init(label: "Grill", shortLabel: "Grill", text: "224°"))
+        let unplugged = Self.present(Self.state(probe2: 150, targets: .init(grill: 225, probe1: 203)))
+        #expect(unplugged.island == .init(label: "Grill", shortLabel: "Grill", text: "224° / 225°"))
+    }
+
+    @Test("the island is in the device's unit")
+    func islandCelsius() {
+        let shown = Self.present(Self.state(probe1: 187, targets: .init(probe1: 203), unit: .celsius))
+        #expect(shown.island.text == "86° → 95°")
+    }
+
+    @Test("an update goes stale three minutes after it was sent, and an ended one never does")
+    func staleDate() {
+        #expect(CookActivityPresenter.staleDate(for: Self.state()) == fixedNow.addingTimeInterval(180))
+        #expect(CookActivityPresenter.staleDate(for: Self.state(updatedAt: nil)) == nil)
+        #expect(CookActivityPresenter.staleDate(for: Self.state(ended: true)) == nil)
+    }
+
+    @Test("stale, it shows \"as of\" the time of the last update, and says nothing about the device")
+    func stale() {
+        let current = Self.present(Self.state(updatedAt: Self.iso(42 * 60)))
+        #expect(current.status == .current)
+        #expect(current.status.note == nil)
+        #expect(current.startedAt != nil)
+
+        let stale = Self.present(Self.state(probe1: 187, updatedAt: Self.iso(42 * 60)), isStale: true)
+        #expect(stale.status == .stale(asOf: "6:42\u{202F}PM"))
+        #expect(stale.status.note == "as of 6:42\u{202F}PM")
+        #expect(stale.grill == "224°")
+        #expect(stale.probes == [.init(label: "Probe 1", text: "187°")])
+    }
+
+    @Test("an ended cook shows \"Cook ended\" with its last temperatures, stops ticking, and leaves 15 minutes later")
+    func ended() {
+        let state = Self.state(probe1: 204, targets: .init(probe1: 203), updatedAt: Self.iso(60), ended: true)
+        let shown = Self.present(state, isStale: true)
+        #expect(shown.status == .ended)
+        #expect(shown.status.note == "Cook ended")
+        #expect(shown.startedAt == nil)
+        #expect(shown.grill == "224°")
+        #expect(shown.probes == [.init(label: "Probe 1", text: "204° → 203°")])
+        #expect(CookActivityPresenter.dismissalDate(for: state) == fixedNow.addingTimeInterval(60 + 15 * 60))
+        #expect(CookActivityPresenter.dismissalDate(for: Self.state(updatedAt: nil, ended: true)) == nil)
     }
 }
 
@@ -323,6 +480,45 @@ struct CookActivityTrackerTests {
 
         #expect(h.port.calls == [.start(cookID: "cook-1"), .update(id: "activity-1")])
         #expect(h.port.states["activity-1"]?.targetTemps == .init(grill: 250))
+    }
+
+    @Test("each update carries its send time; stopping the cook ends it as \"Cook ended\" (#272)")
+    func endedState() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        let cook = Self.active()
+        h.cooks.apply(cook)
+        let started = try #require(h.port.states["activity-1"])
+        #expect(started.updatedAt == "2026-11-22T18:00:00.000Z")
+        #expect(started.ended == nil)
+
+        h.cooks.apply(Self.stopped(cook))
+        let ended = try #require(h.port.states["activity-1"])
+        #expect(ended.ended == true)
+        let shown = CookActivityPresenter.present(try #require(h.port.attributes["activity-1"]), ended)
+        #expect(shown.status.note == "Cook ended")
+    }
+
+    @Test("the cook as re-read gives the activity its reached probes; an unchanged one, or an untracked cook, sends nothing")
+    func cookRead() async throws {
+        let h = ActivityHarness()
+        await h.open(withLive: false)
+        var cook = Self.active()
+        h.tracker.cookRead(cook)
+        #expect(h.port.calls.isEmpty)
+
+        h.cooks.apply(cook)
+        h.tracker.cookRead(cook)
+        #expect(h.port.calls == [.start(cookID: "cook-1")])
+
+        cook.targetsReached = .init(probe1: .init(reachedAt: fixedNow.addingTimeInterval(60)))
+        h.tracker.cookRead(cook)
+        #expect(h.port.calls.last == .update(id: "activity-1"))
+        #expect(h.port.states["activity-1"]?.targetsReached == .init(probe1: "2026-11-22T18:01:00.000Z"))
+
+        h.tracker.cookRead(Self.stopped(cook))
+        #expect(h.port.calls.last == .end(id: "activity-1"))
+        #expect(h.port.states["activity-1"]?.ended == true)
     }
 
     @Test("an activity already showing for the cook (an earlier launch) is taken over, not doubled")
