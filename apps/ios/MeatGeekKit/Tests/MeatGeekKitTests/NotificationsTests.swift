@@ -78,14 +78,23 @@ enum NotificationFixtures {
         return api
     }
 
+    /// A `UserDefaults` of its own, empty, standing in for the app's across
+    /// launches. `done` removes it.
+    static func defaults() -> (UserDefaults, done: () -> Void) {
+        let name = "NotificationsTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return (defaults, { defaults.removePersistentDomain(forName: name) })
+    }
+
     /// A signed-in session over `api`, and the model on `port`.
     @MainActor
-    static func model(_ api: StubAPI, port: FakeNotifications, signedIn: Bool = true) async
+    static func model(_ api: StubAPI, port: FakeNotifications, signedIn: Bool = true, defaults: UserDefaults? = nil) async
         -> (SessionModel, FakeTokenProvider, NotificationsModel) {
         let provider = FakeTokenProvider(account: signedIn ? DeviceFixtures.account : nil)
         let session = SessionModel(tokenProvider: provider, api: api)
         await session.restore()
-        return (session, provider, NotificationsModel(port: port, session: session))
+        return (session, provider, NotificationsModel(port: port, session: session, defaults: defaults))
     }
 }
 
@@ -293,6 +302,45 @@ struct PushTokenRegistrationTests {
         #expect(session.state == SessionModel.State.signedOut(message: SessionModel.sessionEndedMessage))
     }
 
+    @Test("after a 401 ends the session, the next sign-in registers the token again")
+    func reRegistersAfter401() async {
+        let port = FakeNotifications(.granted)
+        let registered = Recorder<String>()
+        let (session, _, model) = await N.model(N.api(registered: registered, deleted: Recorder()), port: port)
+        model.refresh()
+        port.deliver(token: N.token)
+        await model.settled()
+        // Another screen's call gets a 401: the session ends without a sign-out.
+        session.endSession()
+        await session.signIn()
+        model.refresh()
+        await model.settled()
+        #expect(registered.all == [N.tokenHex, N.tokenHex])
+        #expect(model.registeredToken == N.tokenHex)
+    }
+
+    @Test("a token that changed between launches replaces the one the last launch registered")
+    func changedBetweenLaunches() async {
+        let (defaults, done) = N.defaults()
+        defer { done() }
+        let registered = Recorder<String>()
+        let deleted = Recorder<String>()
+        let api = N.api(registered: registered, deleted: deleted)
+        let firstPort = FakeNotifications(.granted)
+        let (_, _, first) = await N.model(api, port: firstPort, defaults: defaults)
+        first.refresh()
+        firstPort.deliver(token: N.token)
+        await first.settled()
+
+        let nextPort = FakeNotifications(.granted)
+        let (_, _, next) = await N.model(api, port: nextPort, defaults: defaults)
+        next.refresh()
+        nextPort.deliver(token: N.otherToken)
+        await next.settled()
+        #expect(registered.all == [N.tokenHex, NotificationsModel.hex(N.otherToken)])
+        #expect(deleted.all == [N.tokenID])
+    }
+
     @Test("a token from before sign-in is registered once signed in")
     func beforeSignIn() async {
         let port = FakeNotifications(.granted)
@@ -350,6 +398,47 @@ struct NotificationSignOutTests {
         await session.signOut()
         #expect(deleted.all == [N.tokenID])
         #expect(session.state == SessionModel.State.signedOut(message: nil))
+    }
+
+    @Test("a token that arrives while signing out is not registered again")
+    func tokenDuringSignOut() async {
+        let port = FakeNotifications(.granted)
+        let registered = Recorder<String>()
+        let deleted = Recorder<String>()
+        var api = N.api(registered: registered, deleted: deleted)
+        api.deletePushTokenHandler = { input in
+            deleted.record(input.path.tokenId)
+            await MainActor.run { port.deliver(token: N.otherToken) }
+            return .noContent(.init())
+        }
+        let (session, _, model) = await N.model(api, port: port)
+        model.refresh()
+        port.deliver(token: N.token)
+        await model.settled()
+        await session.signOut()
+        await model.settled()
+        #expect(registered.all == [N.tokenHex])
+        #expect(model.registeredToken == nil)
+        #expect(session.state == SessionModel.State.signedOut(message: nil))
+    }
+
+    @Test("signing out after a relaunch, before iOS hands over the token, still removes it")
+    func signOutAfterRelaunch() async {
+        let (defaults, done) = N.defaults()
+        defer { done() }
+        let deleted = Recorder<String>()
+        let api = N.api(registered: Recorder(), deleted: deleted)
+        let firstPort = FakeNotifications(.granted)
+        let (_, _, first) = await N.model(api, port: firstPort, defaults: defaults)
+        first.refresh()
+        firstPort.deliver(token: N.token)
+        await first.settled()
+
+        let (session, _, next) = await N.model(api, port: FakeNotifications(.denied), defaults: defaults)
+        await session.signOut()
+        withExtendedLifetime(next) {}
+        #expect(deleted.all == [N.tokenID])
+        #expect(defaults.string(forKey: NotificationsModel.lastTokenKey) == nil)
     }
 
     @Test("with no token, signing out calls nothing")

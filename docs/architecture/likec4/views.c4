@@ -50,7 +50,7 @@ views {
     include ingest.*, observability.*
     include api.cooks, api.negotiate, api.broadcast, api.targets, api.rollup, data.temperatureRollups
     include meatgeek.edge, meatgeek.edge.pusher.twin, meatgeek.mobile, meatgeek.web, entra
-    include meatgeek.web.livePanel, meatgeek.web.chart, meatgeek.mobile.livePanel, meatgeek.mobile.chart
+    include meatgeek.web.livePanel, meatgeek.web.chart, meatgeek.mobile.livePanel, meatgeek.mobile.chart, meatgeek.mobile.alerts
     include delivery.simdevice, operator
   }
 

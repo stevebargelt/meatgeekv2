@@ -58,8 +58,15 @@ public enum AlertPayload {
 /// (`DELETE /users/me/push-tokens/{tokenId}`) when the pitmaster signs out,
 /// and passes a tapped alert's cook on to the screens.
 ///
+/// A registration counts for the sign-in that made it: after any sign-in,
+/// including one that follows a 401, the token is registered again. The
+/// last token this phone registered is kept in `defaults` (when given), so a
+/// token that changed between launches, or a sign-out before iOS hands the
+/// token over, still removes it from the API.
+///
 /// Work runs one step at a time, in the order it was asked for, so a
-/// registration and a sign-out never race. `settled()` waits for it.
+/// registration and a sign-out never race. From the start of a sign-out to
+/// the next sign-in nothing is registered. `settled()` waits for it.
 @MainActor
 @Observable
 public final class NotificationsModel {
@@ -76,17 +83,30 @@ public final class NotificationsModel {
     @ObservationIgnored private let session: SessionModel
     /// The phone's token as iOS last handed it, in lowercase hex.
     @ObservationIgnored private var deviceToken: String?
-    /// The token the API has for this phone and the signed-in user.
+    /// The token this sign-in registered with the API.
     @ObservationIgnored public private(set) var registeredToken: String?
+    /// The `SessionModel.signIns` that `registeredToken` was registered in.
+    @ObservationIgnored private var registeredIn: Int?
+    /// The sign-in being signed out of: nothing registers in it any more.
+    @ObservationIgnored private var closedSignIn: Int?
+    /// Keeps `lastToken` across launches; nil: in memory only.
+    @ObservationIgnored private let defaults: UserDefaults?
+    @ObservationIgnored private var memoryLastToken: String?
     /// The permission prompt is showing, or about to.
     @ObservationIgnored private var asking = false
     @ObservationIgnored private var tail: Task<Void, Never>?
 
+    /// The `UserDefaults` key of the last token this phone registered.
+    public nonisolated static let lastTokenKey = "MeatGeek.lastRegisteredPushToken"
+
     /// Wires itself to `port`, and to `session`'s sign-out
     /// (`SessionModel.beforeSignOut`), which removes this phone's token first.
-    public init(port: any NotificationsPort, session: SessionModel) {
+    /// `defaults` keeps the last registered token across launches (the app
+    /// passes `.standard`); nil keeps it in memory.
+    public init(port: any NotificationsPort, session: SessionModel, defaults: UserDefaults? = nil) {
         self.port = port
         self.session = session
+        self.defaults = defaults
         port.onDeviceToken { [weak self] data in self?.tokenReceived(data) }
         port.onAlertTapped { [weak self] cookID in self?.openCookID = cookID }
         session.beforeSignOut = { [weak self] in await self?.signingOut() }
@@ -101,10 +121,7 @@ public final class NotificationsModel {
     public func refresh() {
         enqueue { [self] in
             permission = await port.permission()
-            if permission == .granted {
-                port.registerForRemoteNotifications()
-                await syncRegistration()
-            }
+            await registerIfGranted()
         }
     }
 
@@ -120,10 +137,7 @@ public final class NotificationsModel {
                 current = await port.requestPermission()
             }
             permission = current
-            if current == .granted {
-                port.registerForRemoteNotifications()
-                await syncRegistration()
-            }
+            await registerIfGranted()
         }
     }
 
@@ -153,26 +167,44 @@ public final class NotificationsModel {
         hex(Data(SHA256.hash(data: Data(hexToken.lowercased().utf8))))
     }
 
+    /// The last token this phone registered and has not removed, across
+    /// launches when `defaults` is given.
+    private var lastToken: String? {
+        get { defaults.map { $0.string(forKey: Self.lastTokenKey) } ?? memoryLastToken }
+        set {
+            if let defaults { defaults.set(newValue, forKey: Self.lastTokenKey) } else { memoryLastToken = newValue }
+        }
+    }
+
+    private func registerIfGranted() async {
+        guard permission == .granted else { return }
+        port.registerForRemoteNotifications()
+        await syncRegistration()
+    }
+
     private func tokenReceived(_ data: Data) {
         deviceToken = Self.hex(data)
         enqueue { [self] in await syncRegistration() }
     }
 
     /// Registers the current token when permission is granted, the user is
-    /// signed in and the API does not have it yet, then removes the token it
-    /// replaces. A failure leaves it unregistered; the next refresh, cook
-    /// screen or token tries again.
+    /// signed in and this sign-in has not registered it yet, then removes the
+    /// token it replaces. A failure leaves it unregistered; the next refresh,
+    /// cook screen or token tries again.
     private func syncRegistration() async {
-        guard permission == .granted, case .signedIn = session.state,
-              let token = deviceToken, token != registeredToken else { return }
+        let signIn = session.signIns
+        guard permission == .granted, case .signedIn = session.state, signIn != closedSignIn,
+              let token = deviceToken, token != registeredToken || registeredIn != signIn else { return }
         guard let output = try? await session.perform({ api in
             try await api.registerPushToken(body: .json(.init(token: token)))
         }) else { return }
         switch output {
         case .ok, .created:
-            let replaced = registeredToken
+            let replaced = Set([registeredToken, lastToken].compactMap { $0 }).subtracting([token])
             registeredToken = token
-            if let replaced { await delete(replaced) }
+            registeredIn = signIn
+            lastToken = token
+            for old in replaced.sorted() { await delete(old) }
         case .unauthorized:
             session.endSession()
         case .badRequest, .internalServerError, .undocumented:
@@ -181,14 +213,21 @@ public final class NotificationsModel {
     }
 
     /// Before the session signs out: the API forgets this phone, so the
-    /// signed-out phone gets no alerts. A failure does not stop the sign-out.
+    /// signed-out phone gets no alerts. Runs after the steps already asked
+    /// for, and nothing registers again until the next sign-in. A failure
+    /// does not stop the sign-out.
     private func signingOut() async {
-        await settled()
-        let tokens = Set([registeredToken, deviceToken].compactMap { $0 })
-        for token in tokens.sorted() {
-            await delete(token)
+        closedSignIn = session.signIns
+        enqueue { [self] in
+            let tokens = Set([registeredToken, lastToken, deviceToken].compactMap { $0 })
+            for token in tokens.sorted() {
+                await delete(token)
+            }
+            registeredToken = nil
+            registeredIn = nil
+            lastToken = nil
         }
-        registeredToken = nil
+        await settled()
     }
 
     private func delete(_ token: String) async {

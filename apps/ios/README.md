@@ -601,9 +601,12 @@ The app asks for permission, registers the phone and presents the alerts
 - **Registering**: once permission is granted, the app asks APNs for the
   token and sends it to `POST /users/me/push-tokens` as lowercase hex. It
   reads the permission again at sign-in and every time the app comes to the
-  foreground (it can change in Settings), and asks APNs for the token then,
-  so a changed token is registered again; the token it replaces is removed
-  with `DELETE /users/me/push-tokens/{tokenId}`. A failed registration is
+  foreground (it can change in Settings), and asks APNs for the token then.
+  It POSTs once per sign-in (also after a 401 ended the last one) and again
+  whenever the token changes. The last token it registered is kept in
+  `UserDefaults`, so the token it replaces is removed with
+  `DELETE /users/me/push-tokens/{tokenId}` even when it changed between
+  launches. A failed registration is
   tried again on the next foreground or cook screen. The app knows a phone at
   the API by its id, the SHA-256 of the token's hex
   (`NotificationsModel.tokenID`), as the API does. No token is logged.
@@ -612,8 +615,12 @@ The app asks for permission, registers the phone and presents the alerts
   reached." with **Open Settings**, which opens the app's page in Settings.
   The live panel works as before.
 - **Sign-out**: `SessionModel.signOut()` first runs `beforeSignOut`, where the
-  model deletes this phone's token while the session can still call the API,
-  then signs out. A failed delete does not stop the sign-out.
+  model deletes this phone's tokens (the current one and the last one it
+  registered, so a sign-out before iOS hands over the token still removes
+  it) while the session can still call the API, then signs out. The deletes
+  run after any step already queued, and nothing registers again until the
+  next sign-in. A failed delete does not stop the sign-out, and is not tried
+  again: the signed-out phone can no longer call the API as that user.
 - **Presenting**: `SystemNotifications` is the notification center's
   delegate from launch, so an alert that arrives while the app is open shows
   its banner and plays its sound on any screen, the cook's own included

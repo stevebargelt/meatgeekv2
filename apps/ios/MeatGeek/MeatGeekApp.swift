@@ -52,7 +52,7 @@ enum AppComposition {
             session: session,
             now: { Date() },
             live: LiveServices(createHub: SignalRLiveHub.factory),
-            notifications: NotificationsModel(port: SystemNotifications.shared, session: session)
+            notifications: NotificationsModel(port: SystemNotifications.shared, session: session, defaults: .standard)
         )
     }
 

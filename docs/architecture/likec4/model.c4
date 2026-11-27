@@ -660,9 +660,8 @@ model {
       technology 'HTTP/2, apns-push-type alert, interruption-level time-sensitive'
       description 'Through the same client and provider-token cache as GET /health/apns (#244). A 410 or BadDeviceToken answer deletes the token.'
     }
-    apns -[decided]-> mobile.alerts 'Time Sensitive target alert' {
-      #decided
-      description "The app registers its token with POST /users/me/push-tokens (#245). Proven on dev without a phone: a made-up token is deleted when Apple answers its alert BadDeviceToken. Delivery to a phone is proven only on the owner's iPhone, by the steps in apps/ios/README.md."
+    apns -> mobile.alerts 'Time Sensitive target alert' {
+      description "The app registers its token with POST /users/me/push-tokens (#245). Proven on dev without a phone: a made-up token is deleted when Apple answers its alert BadDeviceToken. Delivery to a phone is not proven yet: the owner's iPhone check (the steps in apps/ios/README.md) proves it."
     }
     cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
       technology 'WebSockets, @microsoft/signalr'
