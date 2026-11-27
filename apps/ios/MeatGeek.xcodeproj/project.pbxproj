@@ -10,6 +10,9 @@
 		A10000000000000000000021 /* MeatGeekKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000020 /* MeatGeekKit */; };
 		A10000000000000000000024 /* MeatGeekMSAL in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000025 /* MeatGeekMSAL */; };
 		A10000000000000000000028 /* MeatGeekLive in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000029 /* MeatGeekLive */; };
+		A10000000000000000000041 /* MeatGeekActivity in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000042 /* MeatGeekActivity */; };
+		A10000000000000000000043 /* MeatGeekActivity in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000044 /* MeatGeekActivity */; };
+		A10000000000000000000050 /* MeatGeekWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000045 /* MeatGeekWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -34,7 +37,28 @@
 			remoteGlobalIDString = A1000000000000000000000C;
 			remoteInfo = MeatGeek;
 		};
+		A1000000000000000000004E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000047;
+			remoteInfo = MeatGeekWidgets;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000051 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A10000000000000000000050 /* MeatGeekWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000007 /* MeatGeek.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MeatGeek.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -49,6 +73,8 @@
 		A1000000000000000000002A /* MeatGeekLiveUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeatGeekLiveUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000035 /* Live.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = Live.xctestplan; sourceTree = "<group>"; };
 		A10000000000000000000037 /* MeatGeekMSALTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MeatGeekMSALTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000045 /* MeatGeekWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MeatGeekWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000052 /* MeatGeekWidgets-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "MeatGeekWidgets-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -72,6 +98,11 @@
 			path = MeatGeekMSALTests;
 			sourceTree = "<group>";
 		};
+		A10000000000000000000046 /* MeatGeekWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MeatGeekWidgets;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -82,6 +113,7 @@
 				A10000000000000000000021 /* MeatGeekKit in Frameworks */,
 				A10000000000000000000024 /* MeatGeekMSAL in Frameworks */,
 				A10000000000000000000028 /* MeatGeekLive in Frameworks */,
+				A10000000000000000000041 /* MeatGeekActivity in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -106,6 +138,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000049 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000043 /* MeatGeekActivity in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -120,6 +160,7 @@
 				A10000000000000000000006 /* MeatGeekUITests */,
 				A1000000000000000000002B /* MeatGeekLiveUITests */,
 				A10000000000000000000038 /* MeatGeekMSALTests */,
+				A10000000000000000000046 /* MeatGeekWidgets */,
 				A10000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -131,6 +172,7 @@
 				A10000000000000000000008 /* MeatGeekUITests.xctest */,
 				A1000000000000000000002A /* MeatGeekLiveUITests.xctest */,
 				A10000000000000000000037 /* MeatGeekMSALTests.xctest */,
+				A10000000000000000000045 /* MeatGeekWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -143,6 +185,7 @@
 				A1000000000000000000000B /* Release.xcconfig */,
 				A10000000000000000000026 /* Dev.xcconfig */,
 				A10000000000000000000027 /* MeatGeek-Info.plist */,
+				A10000000000000000000052 /* MeatGeekWidgets-Info.plist */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -157,10 +200,12 @@
 				A1000000000000000000000E /* Sources */,
 				A1000000000000000000000F /* Frameworks */,
 				A10000000000000000000010 /* Resources */,
+				A10000000000000000000051 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A1000000000000000000004F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A10000000000000000000005 /* MeatGeek */,
@@ -170,6 +215,7 @@
 				A10000000000000000000020 /* MeatGeekKit */,
 				A10000000000000000000025 /* MeatGeekMSAL */,
 				A10000000000000000000029 /* MeatGeekLive */,
+				A10000000000000000000042 /* MeatGeekActivity */,
 			);
 			productName = MeatGeek;
 			productReference = A10000000000000000000007 /* MeatGeek.app */;
@@ -244,6 +290,29 @@
 			productReference = A10000000000000000000037 /* MeatGeekMSALTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		A10000000000000000000047 /* MeatGeekWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000000000000000000004B /* Build configuration list for PBXNativeTarget "MeatGeekWidgets" */;
+			buildPhases = (
+				A10000000000000000000048 /* Sources */,
+				A10000000000000000000049 /* Frameworks */,
+				A1000000000000000000004A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A10000000000000000000046 /* MeatGeekWidgets */,
+			);
+			name = MeatGeekWidgets;
+			packageProductDependencies = (
+				A10000000000000000000044 /* MeatGeekActivity */,
+			);
+			productName = MeatGeekWidgets;
+			productReference = A10000000000000000000045 /* MeatGeekWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -269,6 +338,9 @@
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = A1000000000000000000000C;
 					};
+					A10000000000000000000047 = {
+						CreatedOnToolsVersion = 26.0;
+					};
 				};
 			};
 			buildConfigurationList = A10000000000000000000016 /* Build configuration list for PBXProject "MeatGeek" */;
@@ -289,6 +361,7 @@
 				A1000000000000000000000D /* MeatGeekUITests */,
 				A1000000000000000000002C /* MeatGeekLiveUITests */,
 				A10000000000000000000039 /* MeatGeekMSALTests */,
+				A10000000000000000000047 /* MeatGeekWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -316,6 +389,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A1000000000000000000003C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1000000000000000000004A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -353,6 +433,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000048 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -370,6 +457,11 @@
 			isa = PBXTargetDependency;
 			target = A1000000000000000000000C /* MeatGeek */;
 			targetProxy = A10000000000000000000036 /* PBXContainerItemProxy */;
+		};
+		A1000000000000000000004F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000047 /* MeatGeekWidgets */;
+			targetProxy = A1000000000000000000004E /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -502,6 +594,40 @@
 			};
 			name = Release;
 		};
+		A1000000000000000000004C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/MeatGeekWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = MeatGeek;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.meatgeek.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		A1000000000000000000004D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/MeatGeekWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = MeatGeek;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.meatgeek.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -550,6 +676,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		A1000000000000000000004B /* Build configuration list for PBXNativeTarget "MeatGeekWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000000000000000000004C /* Debug */,
+				A1000000000000000000004D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -564,6 +699,14 @@
 		A10000000000000000000029 /* MeatGeekLive */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MeatGeekLive;
+		};
+		A10000000000000000000042 /* MeatGeekActivity */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MeatGeekActivity;
+		};
+		A10000000000000000000044 /* MeatGeekActivity */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MeatGeekActivity;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

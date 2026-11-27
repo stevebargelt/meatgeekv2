@@ -11,6 +11,11 @@ struct RootView: View {
     var live: LiveServices?
     /// Alerts on this phone; nil in previews.
     var notifications: NotificationsModel?
+    /// The lock-screen activities, and what they follow readings with.
+    var activities: (any LiveActivities)?
+    var activityLive: LiveServices?
+    /// A cook to open, from a tapped lock-screen activity.
+    var openCook: Binding<String?> = .constant(nil)
 
     var body: some View {
         switch session.state {
@@ -24,7 +29,10 @@ struct RootView: View {
             ProgressView("Signing in…")
                 .accessibilityIdentifier(AccessibilityID.signingIn)
         case .signedIn:
-            SignedInView(session: session, now: now, live: live, notifications: notifications)
+            SignedInView(
+                session: session, now: now, live: live, notifications: notifications,
+                activities: activities, activityLive: activityLive, openCook: openCook
+            )
         }
     }
 }

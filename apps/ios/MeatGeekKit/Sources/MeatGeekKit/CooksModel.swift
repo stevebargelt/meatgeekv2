@@ -56,17 +56,33 @@ public final class CooksModel {
     /// dropped instead of shown or appended.
     @ObservationIgnored private var generation = 0
 
+    /// Keeps a lock-screen activity for each running cook started here; nil:
+    /// none.
+    @ObservationIgnored public let activities: CookActivityTracker?
+
+    /// - Parameters:
+    ///   - activities: the lock-screen activities; nil: the app shows none.
+    ///   - activityLive: what the activities follow readings with; nil:
+    ///     they are started and ended, never updated with readings.
     public init(
         devices: DevicesModel,
         now: @escaping @Sendable () -> Date = { Date() },
         live: LiveServices? = nil,
-        notifications: NotificationsModel? = nil
+        notifications: NotificationsModel? = nil,
+        activities: (any LiveActivities)? = nil,
+        activityLive: LiveServices? = nil
     ) {
         self.session = devices.session
         self.devices = devices
         self.now = now
         self.live = live
         self.notifications = notifications
+        self.activities = activities.map { port in
+            CookActivityTracker(session: devices.session, activities: port, live: activityLive) { [weak devices] deviceID in
+                devices?.device(id: deviceID)?.configuration?.temperatureUnit ?? .fahrenheit
+            }
+        }
+        self.activities?.onCookStopped = { [weak self] cook in self?.apply(cook) }
     }
 
     /// The first time the tab shows: page one. Later calls do nothing.
@@ -140,6 +156,7 @@ public final class CooksModel {
     /// no longer matches the filters. The devices' active cooks follow.
     public func apply(_ cook: Cook) {
         devices.apply(cook)
+        activities?.cookChanged(cook)
         guard case .loaded(var cooks, let token, let hasMore) = list else { return }
         let matches = (deviceFilter == nil || deviceFilter == cook.deviceId)
             && (statusFilter == nil || statusFilter == cook.status)

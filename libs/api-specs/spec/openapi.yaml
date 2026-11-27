@@ -270,3 +270,9 @@ components:
       $ref: './components/schemas/signalr-payloads.yaml#/CookStartedMessage'
     CookStoppedMessage:
       $ref: './components/schemas/signalr-payloads.yaml#/CookStoppedMessage'
+
+    # The iOS lock-screen activity's attributes and content state (#271).
+    CookActivityAttributes:
+      $ref: './components/schemas/live-activity.yaml#/CookActivityAttributes'
+    CookActivityContentState:
+      $ref: './components/schemas/live-activity.yaml#/CookActivityContentState'

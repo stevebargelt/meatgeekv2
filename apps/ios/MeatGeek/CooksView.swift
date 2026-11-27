@@ -28,7 +28,8 @@ struct CooksView: View {
     let model: CooksModel
     let profile: ProfileModel
     let session: SessionModel
-    /// The tab's navigation stack; a tapped alert sets it to its cook.
+    /// The tab's navigation stack. Held by `SignedInView`, so a tapped alert
+    /// or lock-screen activity can open its cook here.
     @Binding var path: [Route]
 
     var body: some View {

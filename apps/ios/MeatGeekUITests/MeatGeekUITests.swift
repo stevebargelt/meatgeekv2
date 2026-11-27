@@ -644,7 +644,10 @@ final class MeatGeekUITests: XCTestCase {
 
         let urlTypes = try XCTUnwrap(info["CFBundleURLTypes"] as? [[String: Any]])
         let schemes = urlTypes.flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
-        XCTAssertEqual(schemes, ["msauth.com.meatgeek.ios"])
+        XCTAssertEqual(schemes, ["msauth.com.meatgeek.ios", "meatgeek"])
+        // The lock-screen activity (#271): Live Activities, updated often.
+        XCTAssertEqual(info["NSSupportsLiveActivities"] as? Bool, true)
+        XCTAssertEqual(info["NSSupportsLiveActivitiesFrequentUpdates"] as? Bool, true)
         XCTAssertNil(info["LSApplicationQueriesSchemes"], "MSAL needs msauthv2/msauthv3 only for the broker")
 
         let baseURL = try XCTUnwrap(info["MeatGeekAPIBaseURL"] as? String)

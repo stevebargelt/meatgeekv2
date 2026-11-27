@@ -5,7 +5,11 @@ import SwiftUI
 /// carries the account menu. The tabs share one devices model and one cooks
 /// model, so a cook started on the Devices tab is on the Cooks tab too.
 ///
-/// A tapped alert opens its cook on the Cooks tab, whichever tab showed.
+/// A running cook started here gets a lock-screen activity (the cooks
+/// model's `CookActivityTracker`); tapping it opens `meatgeek://cook/<id>`,
+/// which `MeatGeekApp` puts in `openCook`; this shows that cook's screen on
+/// the Cooks tab. A tapped alert opens its cook on the Cooks tab too,
+/// whichever tab showed.
 struct SignedInView: View {
     enum TabID: Hashable { case cooks, devices }
 
@@ -17,19 +21,28 @@ struct SignedInView: View {
     @State private var tab = TabID.cooks
     @State private var cooksPath: [Route] = []
     @Environment(\.scenePhase) private var scenePhase
+    /// A cook to open, from a tapped lock-screen activity. Cleared once shown.
+    @Binding var openCook: String?
 
     init(
         session: SessionModel,
         now: @escaping @Sendable () -> Date,
         live: LiveServices?,
-        notifications: NotificationsModel? = nil
+        notifications: NotificationsModel? = nil,
+        activities: (any LiveActivities)? = nil,
+        activityLive: LiveServices? = nil,
+        openCook: Binding<String?> = .constant(nil)
     ) {
         self.session = session
         self.notifications = notifications
+        _openCook = openCook
         let devices = DevicesModel(session: session, now: now)
         _profile = State(initialValue: ProfileModel(session: session))
         _devices = State(initialValue: devices)
-        _cooks = State(initialValue: CooksModel(devices: devices, now: now, live: live, notifications: notifications))
+        _cooks = State(initialValue: CooksModel(
+            devices: devices, now: now, live: live, notifications: notifications,
+            activities: activities, activityLive: activityLive
+        ))
     }
 
     var body: some View {
@@ -46,8 +59,10 @@ struct SignedInView: View {
         .task { await profile.load() }
         // Signed in, and each time the app comes back: the permission may
         // have changed in Settings, and a granted one registers the phone.
+        // The lock-screen activities follow readings only while active.
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active { notifications?.refresh() }
+            cooks.activities?.setAppActive(phase == .active)
         }
         .onChange(of: notifications?.openCookID, initial: true) { _, cookID in
             guard let cookID else { return }
@@ -55,6 +70,13 @@ struct SignedInView: View {
             cooksPath = [.cook(cookID)]
             notifications?.cookOpened()
         }
+        .onChange(of: openCook, initial: true) { _, cookID in
+            guard let cookID else { return }
+            tab = .cooks
+            cooksPath = [.cook(cookID)]
+            openCook = nil
+        }
+        .onDisappear { cooks.activities?.stop() }
     }
 }
 
