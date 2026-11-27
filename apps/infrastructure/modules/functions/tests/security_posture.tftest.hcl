@@ -669,6 +669,65 @@ run "apns_key_settings_reach_the_app" {
   }
 }
 
+# #243 — what the API needs to call Apple: identifiers, published only when set
+# and only beside a vault. The signing key is never a setting.
+run "apns_call_settings_reach_the_app" {
+  command = plan
+  variables {
+    apns_key_vault_uri = "https://mgv2-dev-kv-0123456789.vault.azure.net/"
+    apns_key_name      = "apns-auth-key"
+    apns_key_id        = "ABC123DEFG"
+    apns_team_id       = "TEAM123456"
+    apns_bundle_id     = "com.meatgeek.ios"
+    apns_host          = "api.sandbox.push.apple.com"
+  }
+  assert {
+    condition = jsonencode({ for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name => s.value if startswith(s.name, "APNS_") }) == jsonencode({
+      APNS_BUNDLE_ID     = "com.meatgeek.ios"
+      APNS_HOST          = "api.sandbox.push.apple.com"
+      APNS_KEY_ID        = "ABC123DEFG"
+      APNS_KEY_NAME      = "apns-auth-key"
+      APNS_KEY_VAULT_URI = "https://mgv2-dev-kv-0123456789.vault.azure.net/"
+      APNS_TEAM_ID       = "TEAM123456"
+    })
+    error_message = "The six non-secret APNS_* settings must reach the app, and nothing else with that prefix"
+  }
+}
+
+run "apns_call_settings_need_a_vault" {
+  command = plan
+  variables {
+    apns_key_id    = "ABC123DEFG"
+    apns_team_id   = "TEAM123456"
+    apns_bundle_id = "com.meatgeek.ios"
+    apns_host      = "api.sandbox.push.apple.com"
+  }
+  assert {
+    condition     = length([for s in azapi_resource.function_app.body.properties.siteConfig.appSettings : s.name if startswith(s.name, "APNS_")]) == 0
+    error_message = "With no vault (prod), no APNS_* setting may be published, whatever the other variables hold"
+  }
+}
+
+run "apns_host_must_be_apple" {
+  command = plan
+  variables {
+    apns_host = "example.com"
+  }
+  expect_failures = [
+    var.apns_host,
+  ]
+}
+
+run "apns_team_id_must_be_ten_characters" {
+  command = plan
+  variables {
+    apns_team_id = "short"
+  }
+  expect_failures = [
+    var.apns_team_id,
+  ]
+}
+
 run "apns_key_vault_uri_must_be_a_vault_uri" {
   command = plan
   variables {

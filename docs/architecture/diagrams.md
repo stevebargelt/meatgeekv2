@@ -58,7 +58,7 @@ render those dashed or faded, but its flows describe only what runs today.
 
 ## MeatGeek V2: landscape
 
-Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision. Click a box to go down a level.
+Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). The API signs for the Apple push service through the dev Key Vault. Grey dotted is not built, with no decision. Click a box to go down a level.
 
 View `index` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/index/
 
@@ -79,6 +79,7 @@ graph TB
     Meatgeek.Mobile@{ shape: rounded, label: "iOS app" }
     Meatgeek.Web@{ shape: rounded, label: "Web app" }
   end
+  Apns@{ shape: rectangle, label: "Apple Push Notification service" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   Pitmaster -. "`cooks on`" .-> Smoker
   Team -. "`pull requests`" .-> Delivery
@@ -90,6 +91,8 @@ graph TB
   Meatgeek.Edge -. "`[...]`" .-> Meatgeek.Cloud
   Meatgeek.Cloud -. "`[...]`" .-> Operator
   Meatgeek.Cloud -. "`validates access tokens`" .-> Entra
+  Meatgeek.Cloud -. "`pushes, signed with
+the provider token`" .-> Apns
   Meatgeek.Cloud -. "`[...]`" .-> Meatgeek.Edge
   Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Mobile
   Delivery -. "`XCUITest, simulator`" .-> Meatgeek.Mobile
@@ -107,17 +110,17 @@ to main, serves production`" .-> Meatgeek.Web
   Meatgeek.Web -. "`[...]`" .-> Meatgeek.Cloud
   Delivery -. "`terraform apply (dev)`" .-> Meatgeek
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class Vercel,Smoker,Entra muted
+  class Vercel,Smoker,Apns,Entra muted
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery,Meatgeek.Edge,Meatgeek.Cloud,Meatgeek.Mobile,Meatgeek.Web primary
-  linkStyle 0,1,2,3,4,6,7,8,9,11,12,13,14,15,16,17,18,19,20,21,22 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,6,7,8,9,10,12,13,14,15,16,17,18,19,20,21,22,23 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 5 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 10 stroke:#8D8D8D
+  linkStyle 11 stroke:#8D8D8D
 ```
 
 ## MeatGeek V2: containers
 
-Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision.
+Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). The API signs for the Apple push service through the dev Key Vault. Grey dotted is not built, with no decision.
 
 View `system` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/system/
 
@@ -166,6 +169,7 @@ graph TB
   Smoker@{ shape: rectangle, label: "Pellet smoker" }
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
+  Apns@{ shape: rectangle, label: "Apple Push Notification service" }
   Pitmaster -. "`watches a cook live, reviews cooks`" .-> Meatgeek.Mobile
   Pitmaster -. "`[...]`" .-> Meatgeek.Web
   Vercel -. "`builds apps/web on every push
@@ -188,6 +192,8 @@ token (access_as_user)`" .-> Meatgeek.Cloud.Api
   Meatgeek.Web -. "`connects as the signed-in user`" .-> Meatgeek.Cloud.Realtime
   Operator -. "`imports the APNs key, sign only`" .-> Meatgeek.Cloud.Keyvault
   Meatgeek.Cloud.Api -. "`validates access tokens`" .-> Entra
+  Meatgeek.Cloud.Api -. "`pushes, signed with
+the provider token`" .-> Apns
   Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Mobile
   Meatgeek.Cloud.Realtime -. "`temperature, cook_stopped`" .-> Meatgeek.Web
   Meatgeek.Cloud.Api -. "`[...]`" .-> Meatgeek.Cloud.Data
@@ -236,7 +242,7 @@ reached, ingestion-near-cap`" .-> Meatgeek.Cloud.Observability.Logs
 messageId, $.ct=application/json,
 $.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class Vercel,Smoker,Meatgeek.Edge.Updater,Meatgeek.Cloud.Deviceupdate,Entra muted
+  class Vercel,Smoker,Meatgeek.Edge.Updater,Meatgeek.Cloud.Deviceupdate,Entra,Apns muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class Meatgeek.Cloud.Ingest.Eventhub,Meatgeek.Cloud.Observability.Budgets,Meatgeek.Cloud.Observability.ActivityAlerts,Meatgeek.Cloud.Observability.ActionGroup,Meatgeek.Cloud.Realtime,Meatgeek.Cloud.Ingest.Dps,Meatgeek.Cloud.Ingest.Iothub,Meatgeek.Cloud.Observability.Workbook,Meatgeek.Cloud.Observability.LogAlerts,Meatgeek.Cloud.Observability.Appinsights,Meatgeek.Cloud.Observability.Logs,Meatgeek.Cloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
@@ -245,10 +251,10 @@ $.ce=utf-8, traceparent`" .-> Meatgeek.Cloud.Ingest.Iothub
   class Meatgeek.Cloud.Keyvault,Meatgeek.Cloud.Observability.Collector amber
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class Meatgeek.Cloud.Data green
-  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,16,17,18,19,23,25,28,29,34,37,38,39,40,41,42,43,44,45,46,47,48,50,51,52,53,54 stroke:#8D8D8D,stroke-dasharray:8 4
-  linkStyle 9,10,26,27,30,35,36,49 stroke:#8D8D8D
-  linkStyle 15,21 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 20,22,24,31,32,33,55 stroke:#b45309,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,11,12,13,14,16,17,18,19,20,22,24,26,29,30,35,38,39,40,41,42,43,44,45,46,47,48,49,51,52,53,54,55 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 9,10,27,28,31,36,37,50 stroke:#8D8D8D
+  linkStyle 15 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 21,23,25,32,33,34,56 stroke:#b45309,stroke-dasharray:8 4
 ```
 
 ## MeatGeek cloud (Azure)
@@ -295,6 +301,7 @@ graph TB
   subgraph Delivery["`Delivery pipeline`"]
     Delivery.Simdevice@{ shape: rectangle, label: "simdevice" }
   end
+  Apns@{ shape: rectangle, label: "Apple Push Notification service" }
   Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
   subgraph MeatgeekEdge["`MeatGeek device`"]
     MeatgeekEdge.PusherTwin@{ shape: rectangle, label: "twin client" }
@@ -353,11 +360,13 @@ messageId, $.ct=application/json,
 $.ce=utf-8, traceparent`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Api -. "`signs the APNs
 provider token (ES256)`" .-> MeatgeekCloud.Keyvault
+  MeatgeekCloud.Api -. "`pushes, signed with
+the provider token`" .-> Apns
   MeatgeekCloud.Api -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`diagnostic settings`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Data -. "`cosmos-429-rate`" .-> MeatgeekCloud.Observability.MetricAlerts
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class Entra,MeatgeekCloud.Deviceupdate muted
+  class Entra,Apns,MeatgeekCloud.Deviceupdate muted
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloud.Observability.Budgets,MeatgeekCloud.Observability.ActivityAlerts,MeatgeekCloud.Observability.ActionGroup,MeatgeekCloud.Ingest.Dps,MeatgeekCloud.Ingest.Iothub,MeatgeekCloud.Ingest.Eventhub,MeatgeekCloud.Realtime,MeatgeekCloud.Observability.Workbook,MeatgeekCloud.Observability.LogAlerts,MeatgeekCloud.Observability.Appinsights,MeatgeekCloud.Observability.Logs,MeatgeekCloud.Observability.MetricAlerts indigo
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
@@ -366,8 +375,8 @@ provider token (ES256)`" .-> MeatgeekCloud.Keyvault
   class MeatgeekCloud.Data.TemperatureRollups green
   classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
   class MeatgeekCloud.Keyvault,MeatgeekCloud.Observability.Collector amber
-  linkStyle 0,38 stroke:#0ea5e9,stroke-dasharray:8 4
-  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,26,27,28,29,30,31,32,33,34,35,36,39,40,41 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0 stroke:#0ea5e9,stroke-dasharray:8 4
+  linkStyle 1,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,26,27,28,29,30,31,32,33,34,35,36,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 2,13 stroke:#8D8D8D
   linkStyle 3,18,21,23,37 stroke:#b45309,stroke-dasharray:8 4
 ```
@@ -481,6 +490,8 @@ graph TB
     MeatgeekCloudApi.Targets@{ shape: rectangle, label: "target rule" }
     MeatgeekCloudApi.Repos@{ shape: rectangle, label: "cosmos repositories" }
   end
+  Apns@{ shape: rectangle, label: "Apple Push Notification service" }
+  MeatgeekCloudKeyvault@{ shape: disk, label: "Key Vault: APNs key" }
   Entra@{ shape: rectangle, label: "Microsoft Entra ID" }
   subgraph MeatgeekCloudObservability["`Observability`"]
     MeatgeekCloudObservability.Appinsights@{ shape: rectangle, label: "Application Insights" }
@@ -584,15 +595,21 @@ sets desired claim properties`" .-> MeatgeekCloudIngest.Iothub
   MeatgeekCloudIngest.Eventhub -. "`Event Hub trigger`" .-> MeatgeekCloudApi.Targets
   MeatgeekCloudIngest.Iothub -. "`desired properties`" .-> MeatgeekEdgePusherTwin
   MeatgeekEdgePusherTwin -. "`reported properties`" .-> MeatgeekCloudIngest.Iothub
+  MeatgeekCloudApi -. "`pushes, signed with
+the provider token`" .-> Apns
+  MeatgeekCloudApi -. "`signs the APNs
+provider token (ES256)`" .-> MeatgeekCloudKeyvault
   classDef primary fill:#3b82f6,stroke:#2563eb,color:#eff6ff
   class Delivery,MeatgeekMobile,MeatgeekWeb,MeatgeekCloudApi.Negotiate,MeatgeekCloudApi.Easyauth,MeatgeekCloudApi.Health,MeatgeekCloudApi.Rollup,MeatgeekCloudApi.Otel,MeatgeekCloudApi.Principal,MeatgeekCloudApi.Cooks,MeatgeekCloudApi.Devices,MeatgeekCloudApi.Temperatures,MeatgeekCloudApi.Recipes,MeatgeekCloudApi.Users,MeatgeekCloudApi.Ownership,MeatgeekEdgePusherTwin,MeatgeekCloudApi.Broadcast,MeatgeekCloudApi.Targets,MeatgeekCloudApi.Repos primary
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
-  class Entra muted
+  class Apns,Entra muted
+  classDef amber fill:#A35829,stroke:#7E451D,color:#FFE0C2
+  class MeatgeekCloudKeyvault amber
   classDef indigo fill:#6366f1,stroke:#4f46e5,color:#eef2ff
   class MeatgeekCloudObservability.Appinsights,MeatgeekCloudIngest.Iothub,MeatgeekCloudIngest.Eventhub,MeatgeekCloudRealtime indigo
   classDef green fill:#428a4f,stroke:#2d5d39,color:#f8fafc
   class MeatgeekCloudData.TemperatureRollups,MeatgeekCloudData.Leases,MeatgeekCloudData.Devices,MeatgeekCloudData.Temperatures,MeatgeekCloudData.Cooks,MeatgeekCloudData.Users,MeatgeekCloudData.Recipes green
-  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,31,32,33,34,35,36,37,38,39,40,41,43,44,45,46,47,48,49,50,51,53,54,59,60 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,31,32,33,34,35,36,37,38,39,40,41,43,44,45,46,47,48,49,50,51,53,54,59,60,61,62 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 30,42,52,55,56,57,58 stroke:#b45309,stroke-dasharray:8 4
 ```
 
@@ -1008,9 +1025,8 @@ system browser), no secret`" .-> DevIdentity.Entra
   class DevRg.Keyvault,DevRg.Cosmos green
   classDef muted fill:#64748b,stroke:#475569,color:#f8fafc
   class DevIdentity.Entra muted
-  linkStyle 0,3,4,5,7,10,11,13,14,15,16,17,18,19,21,22,23,24,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
+  linkStyle 0,3,4,5,7,9,10,11,13,14,15,16,17,18,19,21,22,23,24,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42 stroke:#8D8D8D,stroke-dasharray:8 4
   linkStyle 1,2,6,8,12,20,25 stroke:#b45309,stroke-dasharray:8 4
-  linkStyle 9 stroke:#0ea5e9,stroke-dasharray:8 4
 ```
 
 ---

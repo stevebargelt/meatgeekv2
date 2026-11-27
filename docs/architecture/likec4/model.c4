@@ -20,6 +20,18 @@ model {
     description 'Issues the access tokens that the API accepts: user tokens (access_as_user) to the web app and the iOS app by auth code + PKCE, and app-only tokens to the acceptance suite.'
   }
 
+  apns = external 'Apple Push Notification service' {
+    description '''
+      Apple's push service (spec #237), reached from the API over HTTP/2 at `APNS_HOST`
+      (`api.sandbox.push.apple.com` in dev) with Node's built-in `node:http2`. Every request
+      carries a provider token: an ES256 JWT (`kid` = the key id, `iss` = the team id) that the API
+      signs through Key Vault. The token is cached per instance and replaced every 30 minutes
+      (Apple refuses one older than 60 and throttles minting more often than every 20). The call
+      sits behind one transport seam, so tests fake Apple. `GET /health/apns` proves the path: a push
+      to a made-up device token is answered `400 BadDeviceToken` when Apple accepted the token.
+    '''
+  }
+
   vercel = external 'Vercel' {
     description '''
       Hosts the web app. Hobby plan ($0, personal non-commercial use), Git integration,
@@ -413,11 +425,12 @@ model {
           Holds the APNs signing key (#241, spec #237): the owner's Apple `.p8`, imported by hand as
           a software EC P-256 key whose only operation is `sign`. Key Vault has no export
           operation, so the private key never leaves it. Terraform creates the vault empty and never
-          touches the key: no key material, key id or team id reaches Terraform state, an app
-          setting or the repository. The app is told only `APNS_KEY_VAULT_URI` and `APNS_KEY_NAME`.
-          The Function App identity's grant, `Key Vault Crypto User` (sign; no read or export of the
-          private key), is behind `apns_key_signer_enabled`, off until bootstrap is re-run. Nothing
-          signs with it yet (#243).
+          touches the key: no key material reaches Terraform state, an app setting or the
+          repository. The app is told `APNS_KEY_VAULT_URI` and `APNS_KEY_NAME`, plus the identifiers
+          `APNS_KEY_ID`, `APNS_TEAM_ID` (both from GitHub secrets, never committed),
+          `APNS_BUNDLE_ID` and `APNS_HOST` (#243). The Function App identity's grant,
+          `Key Vault Crypto User` (sign; no read or export of the private key), is behind
+          `apns_key_signer_enabled`, on in dev. The API signs its APNs provider token here (#243).
         '''
       }
 
@@ -691,11 +704,14 @@ model {
     cloud.data -> cloud.observability.metricAlerts 'cosmos-429-rate'
     cloud.realtime -> cloud.observability.metricAlerts 'signalr-connection-failure-rate'
 
-    // APNs signing key (#241). The vault exists; nothing signs with it or imports into it yet.
-    cloud.api -[decided]-> cloud.keyvault 'signs the APNs provider token (ES256)' {
-      #decided
-      technology 'Key Vault sign, managed identity, Key Vault Crypto User'
-      description 'The provider token is signed in Key Vault; the app never holds the key (#243).'
+    // APNs signing key (#241) and the path to Apple (#243).
+    cloud.api -> cloud.keyvault 'signs the APNs provider token (ES256)' {
+      technology 'Key Vault sign (REST), managed identity, Key Vault Crypto User'
+      description 'The digest of the provider token goes to Key Vault and the raw signature comes back; the app never holds the key (#243).'
+    }
+    cloud.api -> apns 'pushes, signed with the provider token' {
+      technology 'HTTP/2, node:http2, authorization: bearer <provider token>'
+      description 'One transport seam. Apple answers BadDeviceToken to a made-up device token when it accepts the provider token; GET /health/apns reports that (#243).'
     }
     operator -[decided]-> cloud.keyvault 'imports the APNs key, sign only' {
       #decided

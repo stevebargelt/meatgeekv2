@@ -424,6 +424,31 @@ variable "apns_key_vault_enabled" {
   default     = false
 }
 
+# What the API needs, beside the vault, to call Apple (#243): identifiers, not keys.
+variable "apns_key_id" {
+  description = "The APNs key's 10-character id. Not a secret, but it names the owner's Apple account and this repository's logs are public, so the deployment supplies it from the APNS_KEY_ID GitHub secret as TF_VAR_apns_key_id. Published to the Function App as APNS_KEY_ID. Empty (default) publishes nothing."
+  type        = string
+  default     = ""
+}
+
+variable "apns_team_id" {
+  description = "The Apple Developer team id. Never committed: the deployment supplies it from the APNS_TEAM_ID GitHub secret as TF_VAR_apns_team_id. Published as APNS_TEAM_ID. Empty (default) publishes nothing."
+  type        = string
+  default     = ""
+}
+
+variable "apns_bundle_id" {
+  description = "The iOS app's bundle id, the APNs topic. Published as APNS_BUNDLE_ID. Empty (default) publishes nothing."
+  type        = string
+  default     = ""
+}
+
+variable "apns_host" {
+  description = "The APNs host: api.sandbox.push.apple.com (dev) or api.push.apple.com. Published as APNS_HOST. Empty (default) publishes nothing."
+  type        = string
+  default     = ""
+}
+
 # The Function App identity's grant on that vault (#241): Key Vault Crypto User,
 # scoped to the vault, so the app can sign its APNs provider token and can never
 # read or export the private key.

@@ -41,6 +41,7 @@ import { createRecipeHandler } from './functions/recipes/create-recipe';
 import { getRecipeHandler } from './functions/recipes/get-recipe';
 import { updateRecipeHandler } from './functions/recipes/update-recipe';
 import { deleteRecipeHandler } from './functions/recipes/delete-recipe';
+import { apnsHealthHandler } from './functions/health/apns-health';
 import { cosmosHealthHandler } from './functions/health/cosmos-health';
 import {
   STORAGE_HEARTBEAT_SCHEDULE,
@@ -294,6 +295,16 @@ app.http('cosmosHealth', {
   authLevel: 'anonymous',
   route: 'health/cosmos',
   handler: cosmosHealthHandler,
+});
+
+// APNs health probe (#243): signs a provider token through Key Vault and sends
+// one push to a made-up device token; Apple answering BadDeviceToken proves it
+// accepted the token. Same platform-layer auth as the routes above.
+app.http('apnsHealth', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'health/apns',
+  handler: apnsHealthHandler,
 });
 
 // Host-storage heartbeat (MG-58). The ONLY timer in this app: the host keeps

@@ -118,6 +118,23 @@ run "vault_without_grant" {
   }
 }
 
+run "vault_with_call_settings" {
+  command = plan
+
+  variables {
+    apns_key_vault_enabled = true
+    apns_key_id            = "ABC123DEFG"
+    apns_team_id           = "TEAM123456"
+    apns_bundle_id         = "com.meatgeek.ios"
+    apns_host              = "api.sandbox.push.apple.com"
+  }
+
+  assert {
+    condition     = jsonencode(sort([for s in module.azure_functions.app_setting_names : s if startswith(s, "APNS_")])) == jsonencode(["APNS_BUNDLE_ID", "APNS_HOST", "APNS_KEY_ID", "APNS_KEY_NAME", "APNS_KEY_VAULT_URI", "APNS_TEAM_ID"])
+    error_message = "the Function App must get the key id, team id, bundle id and host beside the vault settings, and no key material"
+  }
+}
+
 run "vault_with_grant" {
   command = plan
 

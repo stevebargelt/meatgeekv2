@@ -237,12 +237,22 @@ locals {
     # the key's name, both non-secret. The key never leaves the vault: the app
     # signs its provider token through Key Vault under its managed identity
     # (Key Vault Crypto User, modules/apns-key-vault). Present only where
-    # the vault exists (dev); absent, not empty, everywhere else. Nothing reads
-    # them yet (#243 does).
+    # the vault exists (dev); absent, not empty, everywhere else. The API reads
+    # them to sign its APNs provider token (#243).
     var.apns_key_vault_uri == "" ? {} : {
       "APNS_KEY_VAULT_URI" = var.apns_key_vault_uri
       "APNS_KEY_NAME"      = var.apns_key_name
     },
+    # What else the API needs to call Apple (#243), all non-secret identifiers:
+    # the key id and team id (from GitHub secrets, never committed: the team id
+    # names the owner's Apple account), the app's bundle id (the push topic) and
+    # the APNs host (sandbox in dev). Each is published only when set, so an
+    # unset one is absent, and the API's health probe names it as missing. The
+    # signing KEY is never here: it stays in Key Vault.
+    var.apns_key_vault_uri == "" || var.apns_key_id == "" ? {} : { "APNS_KEY_ID" = var.apns_key_id },
+    var.apns_key_vault_uri == "" || var.apns_team_id == "" ? {} : { "APNS_TEAM_ID" = var.apns_team_id },
+    var.apns_key_vault_uri == "" || var.apns_bundle_id == "" ? {} : { "APNS_BUNDLE_ID" = var.apns_bundle_id },
+    var.apns_key_vault_uri == "" || var.apns_host == "" ? {} : { "APNS_HOST" = var.apns_host },
   )
 }
 

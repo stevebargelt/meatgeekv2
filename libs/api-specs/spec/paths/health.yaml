@@ -39,3 +39,44 @@ health-cosmos:
           application/json:
             schema:
               $ref: '../components/schemas/common.yaml#/CosmosHealthResponse'
+
+health-apns:
+  get:
+    operationId: getApnsHealth
+    summary: Check the API's own path to Apple's push service
+    description: |
+      Signs an APNs provider token through Key Vault under the Function App's
+      managed identity and sends one push to a made-up device token on the
+      configured APNs host. Apple checks the provider token before the device
+      token, so `400 BadDeviceToken` proves Apple accepted the token and is
+      the healthy answer. Nothing reaches a device.
+
+      The handler does not read the caller's principal: authentication is App
+      Service Authentication's, which answers 401 before the function runs.
+      The body never carries a token, the key, a team id or a dependency's
+      error text.
+    tags: [health]
+    responses:
+      '200':
+        description: Healthy. `status` is `healthy`; there is no `error`.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ApnsHealthResponse'
+      '401':
+        $ref: '../components/responses.yaml#/PlatformUnauthenticated'
+      '503':
+        description: |
+          Unhealthy. `status` is `unhealthy`; `error` is a fixed code, with
+          Apple's `reason` (for example `InvalidProviderToken`) and
+          `probeStatusCode` when the dependency answered.
+        headers:
+          X-Request-ID:
+            $ref: '../components/headers.yaml#/X-Request-ID'
+        content:
+          application/json:
+            schema:
+              $ref: '../components/schemas/common.yaml#/ApnsHealthResponse'

@@ -26,7 +26,7 @@ repository, Terraform state, an app setting, a log or an issue.
 | Purge protection | Off. See [Destroy and recreate](#destroy-and-recreate). |
 | Network | Public access on. The Function App runs on Flex Consumption with no VNet and no fixed outbound address; RBAC is the gate. |
 | Key | **None.** Terraform never creates, imports or reads a key. The vault is empty after every apply until the owner imports the key, and nothing in the stack needs it to exist. |
-| App settings | `APNS_KEY_VAULT_URI` (`https://<vault>.vault.azure.net/`) and `APNS_KEY_NAME` (`apns-auth-key`). Both are names, not secrets. Nothing reads them yet (#243 does). |
+| App settings | `APNS_KEY_VAULT_URI` (`https://<vault>.vault.azure.net/`), `APNS_KEY_NAME` (`apns-auth-key`), `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID` (`com.meatgeek.ios`) and `APNS_HOST` (`api.sandbox.push.apple.com`). All are identifiers, not secrets. The API reads them to sign for Apple ([the path to Apple](#the-path-to-apple)). Terraform publishes the key id and team id only when the GitHub secrets below are set. |
 | Function App grant | `Key Vault Crypto User` on the vault, for the Function App's system-assigned identity. Behind `apns_key_signer_enabled`, on in dev since the owner re-ran `bootstrap.sh` on 2026-11-26 (step 7 below). |
 
 The vault is created over the ARM control plane (azapi), not with
@@ -179,11 +179,56 @@ printf '%s' "$APNS_KEY_ID"   | gh secret set APNS_KEY_ID  --repo stevebargelt/me
 printf '%s' "$APPLE_TEAM_ID" | gh secret set APNS_TEAM_ID --repo stevebargelt/meatgeekv2 --env development-infra-apply
 ```
 
-Nothing reads them yet. #243 passes them to Terraform as sensitive variables
-and on to the Function App as `APNS_KEY_ID` and `APNS_TEAM_ID`, beside
-`APNS_BUNDLE_ID` (`com.meatgeek.ios`) and `APNS_HOST`
-(`api.sandbox.push.apple.com`), which are not account-specific and can be
-committed in `dev.tfvars`.
+`infra-apply-dev.yml` must pass them to Terraform as `TF_VAR_apns_key_id` and
+`TF_VAR_apns_team_id` (two `env:` lines on the apply job, beside `TF_INPUT`:
+`TF_VAR_apns_key_id: ${{ secrets.APNS_KEY_ID }}` and
+`TF_VAR_apns_team_id: ${{ secrets.APNS_TEAM_ID }}`; the owner adds them, as the
+bot that opened #243's pull request may not edit workflows), and Terraform publishes them to the Function App as
+`APNS_KEY_ID` and `APNS_TEAM_ID`, beside `APNS_BUNDLE_ID` (`com.meatgeek.ios`)
+and `APNS_HOST` (`api.sandbox.push.apple.com`), which are not account-specific
+and are committed in `dev.tfvars`. Until the secrets exist the two settings are
+absent and the health probe below answers `APNS_KEY_ID_missing`.
+
+## The path to Apple
+
+The API reaches Apple's push service in three steps, all in `apps/api/src/shared/apns/`:
+
+1. **Sign through Key Vault.** `KeyVaultSigner` posts the SHA-256 digest of the
+   JWT's signing input to the vault's `keys/<name>//sign` operation (`ES256`)
+   under the Function App's managed identity, and gets the raw 64-byte
+   signature back, which is exactly a JWT's ES256 signature. The key never
+   leaves the vault and is never read.
+2. **Cache the provider token.** `ProviderTokenCache` keeps the JWT per
+   instance and mints a new one 30 minutes after the last (Apple refuses a
+   token older than 60 minutes and throttles minting more often than every 20).
+3. **Send over HTTP/2.** `ApnsClient` posts to `https://$APNS_HOST/3/device/<token>`
+   with `authorization: bearer <JWT>`, through one transport seam
+   (`ApnsTransport`; production is `node:http2`, no dependency). Tests use a fake.
+
+### The dev proof: `GET /health/apns`
+
+The route sends one push to a made-up device token (64 zeros). Apple checks
+the provider token before the device token, so:
+
+| Apple answers | Meaning | Route |
+| --- | --- | --- |
+| `400 BadDeviceToken` | Apple accepted the token the Function App signed | `200 healthy` |
+| `403 InvalidProviderToken`, `ExpiredProviderToken`, ... | Apple refused the token | `503`, `error: apns_rejected`, `reason` |
+| a Key Vault failure | the identity, the key or its import is wrong | `503`, `key_vault_sign_failed` with Key Vault's status |
+
+The live acceptance proof `apns health` (`apps/api/acceptance/proofs/apns-health.proof.ts`)
+runs it in Deploy Dev App. It needs the key imported (step 6) and the two
+secrets set (step 8).
+
+### If Key Vault cannot sign with the imported key
+
+Two assumptions here come from the documentation and are settled by the first
+live run: that an imported EC P-256 `.p8` is signable through Key Vault, and
+that the `//sign` path signs with the key's current version. If the proof
+fails with `key_vault_sign_failed` / `key_vault_bad_signature` that Key Vault's
+status cannot explain by a missing grant or key, put a card to the owner with
+the alternatives (for example Managed HSM, or a signing service that holds the
+key). **An app setting holding the key is not an alternative.**
 
 ## Destroy and recreate
 

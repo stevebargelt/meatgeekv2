@@ -96,6 +96,8 @@ paths:
     $ref: './paths/recipes.yaml#/recipe-item'
   /health/cosmos:
     $ref: './paths/health.yaml#/health-cosmos'
+  /health/apns:
+    $ref: './paths/health.yaml#/health-apns'
 
 x-signalr:
   hub: temperatureHub

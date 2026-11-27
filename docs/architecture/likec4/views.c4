@@ -22,7 +22,7 @@ views {
 
   view index {
     title 'MeatGeek V2: landscape'
-    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision. Click a box to go down a level.'
+    description 'Who uses it, what it depends on, and how changes reach it. MeatGeek V2 is three things: the device on the smoker, the cloud, and the apps. Both apps are live: the web app on Vercel, the iOS app from Xcode (not distributed). The API signs for the Apple push service through the dev Key Vault. Grey dotted is not built, with no decision. Click a box to go down a level.'
     include *
     include meatgeek.edge, meatgeek.cloud, meatgeek.mobile, meatgeek.web
     include vercel
@@ -30,10 +30,10 @@ views {
 
   view system of meatgeek {
     title 'MeatGeek V2: containers'
-    description 'Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). Decided and unbuilt: the APNs signing path to the dev Key Vault (sky dashed); grey dotted is not built, with no decision.'
+    description 'Everything that runs. Both apps are live: the web app on Vercel, the iOS app from Xcode against dev (not distributed). The API signs for the Apple push service through the dev Key Vault. Grey dotted is not built, with no decision.'
     include *
     include edge.*, cloud.*, cloud.ingest.*, cloud.observability.*
-    include pitmaster, smoker, entra, vercel
+    include pitmaster, smoker, entra, vercel, apns
     include delivery.simdevice
   }
 
@@ -66,7 +66,7 @@ views {
       answer `404 DEVICE_NOT_FOUND`.
     '''
     include *
-    include meatgeek.cloud.data.*, meatgeek.cloud.realtime, entra, meatgeek.cloud.observability.appinsights
+    include meatgeek.cloud.data.*, meatgeek.cloud.realtime, entra, apns, meatgeek.cloud.keyvault, meatgeek.cloud.observability.appinsights
     include meatgeek.cloud.ingest.iothub, meatgeek.cloud.ingest.eventhub, meatgeek.edge.pusher.twin
   }
 
