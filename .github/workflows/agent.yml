@@ -172,6 +172,8 @@ jobs:
           prompt: |
             You are working on issue #${{ needs.gate.outputs.issue }} in ${{ github.repository }}, with no one watching.
             Nothing blocks it: every issue it was blocked by is closed as completed. Read AGENTS.md first and follow it.
+            Run every sub-agent, task and command in the foreground and wait for it: this session ends the
+            moment you stop, and anything still running in the background is killed with it.
 
             1. Read the issue with `gh issue view ${{ needs.gate.outputs.issue }} --comments`.
             2. Implement what it asks ("What done looks like", when it has one), test-first where it has
