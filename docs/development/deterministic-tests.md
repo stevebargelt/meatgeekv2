@@ -150,6 +150,23 @@ that would otherwise never finish, so it cannot turn a slow pass into a failure.
   `TF_DESTROY_GUARD_AUTHORIZED_CHANGES` per case); test-repeat runs each suite
   with only an allowlisted environment.
 
+### Swift (iOS)
+
+- **A fake clock the test moves.** `VirtualClock` in MeatGeekKit's
+  `LiveTests.swift` stands in for retry sleeps: `advance(by:)` wakes each sleep
+  whose deadline has passed.
+- **`until(what) { condition }`** yields until the condition holds. It gives
+  up after 30 s, far longer than any wait takes, and records an issue naming
+  `what`. That limit is a hang guard: it stops a stuck wait from running into
+  the test plan's 300 s allowance with no clue which wait stuck, and it never
+  fails a slow pass. Wait for at least a count (`calls >= 2`), then `#expect`
+  the exact count. A count that overshoots then fails at once and names
+  itself, where `== 2` would spin until the guard (#270).
+- **State a fake shares across tasks is locked for the whole update.** `Box`
+  (`CooksTests.swift`) holds its lock through `box.value += 1`. With a lock
+  only around get and set, two handlers running at once could lose an
+  increment (#270).
+
 ## The live suites are the exception
 
 The live acceptance suite and the live browser proof wait on a real cloud by
