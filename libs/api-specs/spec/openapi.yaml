@@ -53,7 +53,7 @@ security:
 
 tags:
   - name: cooks
-    description: Start, stop, read and list the caller's cooks.
+    description: Start, stop, read and list the caller's cooks, and change a running cook's targets.
   - name: temperatures
     description: The latest and historical readings of the caller's devices.
   - name: devices
@@ -76,6 +76,8 @@ paths:
     $ref: './paths/cooks.yaml#/cook-chart'
   /cooks/{cookId}/stop:
     $ref: './paths/cooks.yaml#/cook-stop'
+  /cooks/{cookId}/targets:
+    $ref: './paths/cooks.yaml#/cook-targets'
   /negotiate:
     $ref: './paths/negotiate.yaml#/negotiate'
   /temperatures/current/{deviceId}:
@@ -190,6 +192,8 @@ components:
       $ref: './components/schemas/cook.yaml#/StartCookTargetTemperatures'
     StartCookRequest:
       $ref: './components/schemas/cook.yaml#/StartCookRequest'
+    UpdateCookTargetsRequest:
+      $ref: './components/schemas/cook.yaml#/UpdateCookTargetsRequest'
     CookListResponse:
       $ref: './components/schemas/cook.yaml#/CookListResponse'
     CookChartChannel:

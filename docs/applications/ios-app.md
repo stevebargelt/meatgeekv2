@@ -46,7 +46,7 @@ The screens, and the models behind them:
 | ----------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | Sign-in     | `SessionModel`, `MSALTokenProvider`                     | Entra, then `GET /users/me` for the account menu's name                                               |
 | Devices tab | `DevicesModel`, `ClaimDeviceModel`, `RenameDeviceModel` | `GET /devices`, `GET /cooks?status=active`, `POST /devices/claim`, `PATCH` and `DELETE /devices/{id}` |
-| Cooks tab   | `CooksModel`, `StartCookModel`, `CookDetailModel`       | `GET /cooks`, `POST /cooks`, `GET /cooks/{cookId}`, `POST /cooks/{cookId}/stop`                       |
+| Cooks tab   | `CooksModel`, `StartCookModel`, `CookDetailModel`       | `GET /cooks`, `POST /cooks`, `GET /cooks/{cookId}`, `POST /cooks/{cookId}/stop`, `PUT /cooks/{cookId}/targets`                     |
 | Live panel  | `LiveConnection`, `LivePanelModel`                      | `POST /negotiate`, the SignalR hub, `GET /temperatures/current/{deviceId}` (backfill)                 |
 | Cook chart  | `CookChartModel`, `ChartSeries`                         | `GET /cooks/{cookId}/chart`, plus the readings the live panel receives                                |
 

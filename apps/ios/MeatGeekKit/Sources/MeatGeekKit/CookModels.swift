@@ -120,6 +120,98 @@ public final class StartCookModel {
     }
 }
 
+/// Changing a running cook's targets (#240): the grill and four probes,
+/// filled from the cook, checked as the start form checks them, then
+/// `PUT /cooks/{cookId}/targets`. The fields are the cook's whole set of
+/// targets: a blank one clears that target. The server re-arms a changed
+/// target and keeps the reached mark of one saved unchanged.
+@MainActor
+@Observable
+public final class EditTargetsModel {
+    public nonisolated static let notActiveMessage = "This cook has ended, so its targets can no longer be changed."
+
+    public let cookID: String
+    /// Each target as typed, filled with the cook's targets in °F.
+    public var input: [TargetKey: String]
+    public private(set) var fieldErrors: [TargetKey: String] = [:]
+    public private(set) var problem: APIProblem?
+    public private(set) var saving = false
+
+    @ObservationIgnored private let session: SessionModel
+    @ObservationIgnored private let onSaved: (Cook) -> Void
+    @ObservationIgnored private let onNotActive: () async -> Void
+
+    init(cook: Cook, session: SessionModel, onSaved: @escaping (Cook) -> Void, onNotActive: @escaping () async -> Void) {
+        self.cookID = cook.id
+        self.session = session
+        self.onSaved = onSaved
+        self.onNotActive = onNotActive
+        var input: [TargetKey: String] = [:]
+        for key in TargetKey.allCases {
+            if let value = key.value(in: cook.targetTemps) { input[key] = CookText.number(value) }
+        }
+        self.input = input
+    }
+
+    public subscript(target key: TargetKey) -> String {
+        get { input[key] ?? "" }
+        set { input[key] = newValue }
+    }
+
+    /// Checks the fields, then saves them. Returns the saved cook, which the
+    /// cook screen already shows; nil while the form stays.
+    public func save() async -> Cook? {
+        guard !saving else { return nil }
+        fieldErrors = CookValidation.validateTargets(input)
+        guard fieldErrors.isEmpty else { return nil }
+        saving = true
+        defer { saving = false }
+        let id = cookID
+        let body = Components.Schemas.UpdateCookTargetsRequest(targetTemps: CookValidation.targetTemps(input))
+        let output: Operations.UpdateCookTargets.Output
+        do {
+            output = try await session.perform { api in
+                try await api.updateCookTargets(path: .init(cookId: id), body: .json(body))
+            }
+        } catch SessionError.sessionEnded {
+            return nil
+        } catch {
+            problem = APIProblem(error: error)
+            return nil
+        }
+        switch output {
+        case .ok(let ok):
+            guard let cook = try? ok.body.json else {
+                problem = APIProblem(message: "The targets were saved, but the answer could not be read.")
+                return nil
+            }
+            problem = nil
+            onSaved(cook)
+            return cook
+        case .unauthorized:
+            session.endSession()
+        case .conflict(let response):
+            let body = try? response.body.json
+            problem = APIProblem(status: 409, code: body?.error.rawValue, message: Self.notActiveMessage, requestID: body?.requestId)
+            await onNotActive()
+        case .badRequest(let response):
+            problem = APIProblem(status: 400, body: try? response.body.json)
+        case .forbidden(let response):
+            problem = APIProblem(status: 403, body: try? response.body.json)
+        case .notFound(let response):
+            problem = APIProblem(status: 404, body: try? response.body.json)
+        case .internalServerError(let response):
+            problem = APIProblem(status: 500, body: try? response.body.json)
+        case .undocumented(let status, _):
+            problem = APIProblem(status: status, body: nil)
+        }
+        return nil
+    }
+}
+
+/// A sheet's item: one edit per sheet.
+extension EditTargetsModel: Identifiable {}
+
 /// One cook: its fields, Stop while it is active, the live panel of an
 /// active cook, and the chart. Mirrors apps/web/src/cooks/cook-detail-page.tsx.
 @MainActor
@@ -260,6 +352,24 @@ public final class CookDetailModel {
         case .undocumented(let status, _):
             stopState = .failed(APIProblem(status: status, body: nil))
         }
+    }
+
+    /// Target editing for a running cook; nil for an ended one, which
+    /// offers none. A save shows the saved cook here, on the live panel and
+    /// in the lists. A save refused because the cook ended reads it again.
+    public func editTargets() -> EditTargetsModel? {
+        guard let cook, cook.status == .active else { return nil }
+        return EditTargetsModel(
+            cook: cook,
+            session: cooks.session,
+            onSaved: { [weak self] saved in self?.targetsSaved(saved) },
+            onNotActive: { [weak self] in await self?.reload() }
+        )
+    }
+
+    private func targetsSaved(_ cook: Cook) {
+        show(cook)
+        cooks.apply(cook)
     }
 
     /// The screen is showing: the live panel connects.

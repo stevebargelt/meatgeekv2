@@ -88,6 +88,10 @@ enum AccessibilityID {
     static let cookDetailEnded = "cookDetail.ended"
     static let cookDetailStop = "cookDetail.stop"
     static let cookDetailStopProblem = "cookDetail.stopProblem"
+    static let cookDetailEditTargets = "cookDetail.editTargets"
+    static func editTarget(_ key: String) -> String { "editTargets.target.\(key)" }
+    static let editTargetsSave = "editTargets.save"
+    static let editTargetsProblem = "editTargets.problem"
     static let chart = "chart.chart"
     static let chartLoading = "chart.loading"
     static let chartNotAvailable = "chart.notAvailable"

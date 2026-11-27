@@ -60,7 +60,7 @@ security:
   - bearerAuth: []
 tags:
   - name: cooks
-    description: Start, stop, read and list the caller's cooks.
+    description: Start, stop, read and list the caller's cooks, and change a running cook's targets.
   - name: temperatures
     description: The latest and historical readings of the caller's devices.
   - name: devices
@@ -625,6 +625,129 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeviceTwinUpdateFailedError'
+  /cooks/{cookId}/targets:
+    put:
+      operationId: updateCookTargets
+      summary: Set, change and clear a running cook's targets
+      description: |
+        Replaces the targets of the caller's running cook `{cookId}` with the
+        body's `targetTemps` (#240) and returns the cook directly (NOT wrapped
+        in ApiResponse). Mirrors apps/api/src/functions/cooks/update-cook-targets.ts:
+          - The limits are those of POST /cooks: the grill and probes 1 to 4
+            only, each from 0 to 1000 degrees F. A channel left out of
+            `targetTemps` is cleared; `{}` clears every target. The last save
+            wins.
+          - A channel whose target changes to a different value, is added or is
+            cleared re-arms: it leaves `targetsReached`, and a reading counted
+            towards the old target no longer counts. A new target that is
+            already met is reached under the ordinary rule, on the next two
+            readings. A channel saved with the target it has keeps its state;
+            a save that changes no target writes nothing.
+          - The cook is point-read in the caller's partition: absent there
+            (never started, or another user's) is 404 NOT_FOUND. A cook that is
+            not `active` is 409 COOK_NOT_ACTIVE. Its device must be registered
+            to the caller, else 403 DEVICE_NOT_OWNED. None of these write.
+          - The write is conditional on the version read, so it never undoes a
+            concurrent stop (that is 409) or the target rule's own write.
+          - No SignalR message is sent and the device twin is not touched: the
+            device does not use targets. A client showing the cook reads it
+            again to see the change.
+      tags:
+        - cooks
+      parameters:
+        - name: cookId
+          in: path
+          required: true
+          description: Id of the cook. An id that is only whitespace is 400.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCookTargetsRequest'
+      responses:
+        '200':
+          description: The cook with its new targets and reached state.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cook'
+        '400':
+          description: |
+            VALIDATION_ERROR: the body is not a JSON object, lacks
+            `targetTemps`, has another field, or a target breaks its rule;
+            `message` names the field. Or `{cookId}` is blank. No Cosmos call is
+            made, so there is no x-meatgeek-request-charge.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            DEVICE_NOT_OWNED. The device is not registered to the caller (it
+            belongs to someone else, or nobody registered it; the body is the same
+            either way). Nothing was written and nothing was emitted.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: NOT_FOUND. No cook with this id in the caller's partition.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            COOK_NOT_ACTIVE. The cook is not running (it has ended, or was
+            stopped while the save was made). Nothing was written.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: |
+            INTERNAL_SERVER_ERROR with fixed text: missing configuration or a Cosmos
+            failure. Carries x-meatgeek-request-charge when the Cosmos calls made
+            before the failure, or the failing call, reported a charge. Carries
+            X-Request-ID (the caller's, else the invocation id) since HAR-75; the
+            body's `requestId` is the invocation id.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+            x-meatgeek-request-charge:
+              $ref: '#/components/headers/RequestCharge'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /negotiate:
     post:
       operationId: negotiate
@@ -1878,6 +2001,7 @@ components:
         - CLAIM_REFUSED
         - CONCURRENT_UPDATE
         - COOK_ALREADY_ACTIVE
+        - COOK_NOT_ACTIVE
         - COOK_ACTIVE
         - COOK_ID_REUSED
         - NO_READINGS
@@ -2197,8 +2321,8 @@ components:
     Cook:
       type: object
       description: |
-        Cook session, as GET /cooks (array items), GET /cooks/{cookId}, POST /cooks and
-        POST /cooks/{cookId}/stop return it and as the cook_started and
+        Cook session, as GET /cooks (array items), GET /cooks/{cookId}, POST /cooks,
+        POST /cooks/{cookId}/stop and PUT /cooks/{cookId}/targets return it and as the cook_started and
         cook_stopped SignalR messages carry it. The repository projects every
         stored cook onto exactly these fields (toCook in
         apps/api/src/shared/cosmos/cooks-repository.ts). Cooks started through
@@ -2269,9 +2393,10 @@ components:
     StartCookTargetTemperatures:
       type: object
       description: |
-        The `targetTemps` POST /cooks accepts (HAR-75): any subset of the grill
-        and the four probes, each a finite number from 0 to 1000 degrees F. Any
-        other key, or a value out of range, is 400 VALIDATION_ERROR naming it.
+        The `targetTemps` POST /cooks (HAR-75) and PUT /cooks/{cookId}/targets
+        (#240) accept: any subset of the grill and the four probes, each a finite
+        number from 0 to 1000 degrees F. Any other key, or a value out of range,
+        is 400 VALIDATION_ERROR naming it.
       additionalProperties: false
       properties:
         grill:
@@ -2355,6 +2480,18 @@ components:
         notes:
           type: string
           maxLength: 2000
+    UpdateCookTargetsRequest:
+      type: object
+      description: |
+        Body for PUT /cooks/{cookId}/targets (#240). `targetTemps` is the cook's
+        whole set of targets after the save: a channel left out is cleared, and
+        `{}` clears every target. Saves are not merged; the last one wins.
+      required:
+        - targetTemps
+      additionalProperties: false
+      properties:
+        targetTemps:
+          $ref: '#/components/schemas/StartCookTargetTemperatures'
     CookListResponse:
       type: object
       description: |

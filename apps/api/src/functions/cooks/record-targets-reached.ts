@@ -8,7 +8,7 @@ import {
   resolveOwners,
   type LiveReading,
 } from '../signalr/broadcast-temperature';
-import { applyReadings, type TargetState } from './target-rule';
+import { applyReadings, nonEmpty, type TargetState } from './target-rule';
 
 /**
  * The target rule on the reading stream: records on each running cook which
@@ -77,10 +77,6 @@ export class TargetsNotRecordedError extends Error {
   }
 }
 
-function nonEmpty<T extends object>(map: T): T | undefined {
-  return Object.keys(map).length > 0 ? map : undefined;
-}
-
 export async function recordTargetsReachedHandler(
   events: unknown,
   context: InvocationContext,
@@ -127,6 +123,7 @@ export async function recordTargetsReachedHandler(
           const before: TargetState = {
             targetsReached: cook.targetsReached ?? {},
             targetsPending: cook.targetsPending ?? {},
+            targetsSeen: cook.targetsSeen,
           };
           const after = applyReadings(before, cook.targetTemps, group.readings);
           if (after === before) {
@@ -137,6 +134,7 @@ export async function recordTargetsReachedHandler(
           return {
             targetsReached: nonEmpty(after.targetsReached),
             targetsPending: nonEmpty(after.targetsPending),
+            targetsSeen: nonEmpty(after.targetsSeen),
           };
         });
         return outcome;

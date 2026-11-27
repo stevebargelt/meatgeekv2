@@ -103,14 +103,39 @@ public enum CookValidation {
         case .invalid: errors.weight = weightMessage
         case .number(let weight): if weight <= 0 || weight > 1000 { errors.weight = weightMessage }
         }
+        errors.targets = validateTargets(input.targets)
+        return errors
+    }
+
+    /// Each target's message, keyed by the targets that break the rule: a
+    /// blank one is no target, anything else must be a number from 0 to
+    /// 1000. The start form and a running cook's target editing share it.
+    public static func validateTargets(_ targets: [TargetKey: String]) -> [TargetKey: String] {
+        var errors: [TargetKey: String] = [:]
         for key in TargetKey.allCases {
-            switch parse(input[target: key]) {
+            switch parse(targets[key] ?? "") {
             case .blank: break
-            case .invalid: errors.targets[key] = targetMessage(key)
-            case .number(let target): if target < 0 || target > 1000 { errors.targets[key] = targetMessage(key) }
+            case .invalid: errors[key] = targetMessage(key)
+            case .number(let target): if target < 0 || target > 1000 { errors[key] = targetMessage(key) }
             }
         }
         return errors
+    }
+
+    /// The targets typed, blank ones left out; empty when every one is blank.
+    public static func targetTemps(_ targets: [TargetKey: String]) -> Components.Schemas.StartCookTargetTemperatures {
+        var temps = Components.Schemas.StartCookTargetTemperatures()
+        for key in TargetKey.allCases {
+            guard case .number(let target) = parse(targets[key] ?? "") else { continue }
+            switch key {
+            case .grill: temps.grill = target
+            case .probe1: temps.probe1 = target
+            case .probe2: temps.probe2 = target
+            case .probe3: temps.probe3 = target
+            case .probe4: temps.probe4 = target
+            }
+        }
+        return temps
     }
 
     /// The `POST /cooks` body for a valid input. `id` is the start intent's
@@ -123,20 +148,8 @@ public enum CookValidation {
             meatType: DeviceValidation.trimmed(input.meatType)
         )
         if case .number(let weight) = parse(input.weight) { body.weight = weight }
-        var temps = Components.Schemas.StartCookTargetTemperatures()
-        var any = false
-        for key in TargetKey.allCases {
-            guard case .number(let target) = parse(input[target: key]) else { continue }
-            any = true
-            switch key {
-            case .grill: temps.grill = target
-            case .probe1: temps.probe1 = target
-            case .probe2: temps.probe2 = target
-            case .probe3: temps.probe3 = target
-            case .probe4: temps.probe4 = target
-            }
-        }
-        if any { body.targetTemps = temps }
+        let temps = targetTemps(input.targets)
+        if temps != Components.Schemas.StartCookTargetTemperatures() { body.targetTemps = temps }
         return body
     }
 }
