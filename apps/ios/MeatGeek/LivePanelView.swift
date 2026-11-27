@@ -2,7 +2,8 @@ import MeatGeekKit
 import SwiftUI
 
 /// An active cook's live readings: a badge (Live, Waiting, Reconnecting…,
-/// No reading for …), Grill and Probes 1–4, and when the reading was taken.
+/// No reading for …), Grill and Probes 1–4 with each one's target and a
+/// reached probe's mark, and when the reading was taken.
 /// Re-read every second, so the age and "No reading for …" advance without a
 /// new message. Mirrors apps/web/src/live/live-panel.tsx.
 struct LivePanelView: View {
@@ -23,10 +24,32 @@ struct LivePanelView: View {
                         .accessibilityIdentifier(AccessibilityID.liveWaiting)
                 }
                 ForEach(display.channels) { channel in
-                    LabeledContent(channel.label) {
-                        Text(channel.text)
+                    VStack(alignment: .leading, spacing: 2) {
+                        LabeledContent(channel.label) {
+                            Text(channel.text)
+                                .monospacedDigit()
+                                .accessibilityIdentifier(AccessibilityID.liveChannel(channel.id))
+                        }
+                        // The target beside the reading, and a reached
+                        // probe's mark, on a line of their own so the
+                        // reading reads as it did before targets.
+                        if channel.target != nil || channel.reached != nil {
+                            HStack(spacing: 8) {
+                                Spacer()
+                                if let reached = channel.reached {
+                                    Text(reached)
+                                        .foregroundStyle(.green)
+                                        .accessibilityIdentifier(AccessibilityID.liveReached(channel.id))
+                                }
+                                if let target = channel.target {
+                                    Text(target)
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityIdentifier(AccessibilityID.liveTarget(channel.id))
+                                }
+                            }
+                            .font(.caption)
                             .monospacedDigit()
-                            .accessibilityIdentifier(AccessibilityID.liveChannel(channel.id))
+                        }
                     }
                 }
                 Text(display.readingTime)

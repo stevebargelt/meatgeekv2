@@ -609,6 +609,94 @@ struct LivePanelModelTests {
         p.model.disappear()
     }
 
+    /// en_US in UTC, so a reached time reads the same on every machine.
+    static let enUS = Locale(identifier: "en_US")
+    static let utc = TimeZone(identifier: "UTC")!
+
+    func cook(
+        targets: Components.Schemas.TargetTemperatures?, reached: Components.Schemas.TargetsReached? = nil
+    ) -> Cook {
+        var cook = CookFixtures.cook("cook-1", device: "box", status: .active)
+        cook.targetTemps = targets
+        cook.targetsReached = reached
+        return cook
+    }
+
+    @Test("a channel with a target and a reading shows the target, in the device's unit, converted as readings are")
+    func targets() async {
+        let p = PanelHarness(
+            cook: cook(targets: .init(grill: 225, probe1: 203, probe2: 180)),
+            configuration: .init(temperatureUnit: .celsius)
+        )
+        await p.open()
+        // No reading yet: every channel looks as it does without a target.
+        #expect(p.display.channels.allSatisfy { $0.target == nil && $0.reached == nil })
+
+        p.hub.emit(LiveFixtures.temperature(grill: 212, probe1: 150, probe2: nil, probe3: 98.6))
+        let channels = p.display.channels
+        #expect(channels.map(\.text) == ["100 °C", "65.6 °C", "—", "37 °C", "—"])
+        #expect(channels.map(\.target) == ["Target 107.2 °C", "Target 95 °C", nil, nil, nil])
+        #expect(channels.allSatisfy { $0.reached == nil })
+        p.model.disappear()
+    }
+
+    @Test("targets in °F on a fahrenheit device, or one not read yet")
+    func targetsFahrenheit() async {
+        let p = PanelHarness(cook: cook(targets: .init(probe1: 203.5)))
+        await p.open()
+        p.hub.emit(LiveFixtures.temperature(grill: 225, probe1: 150))
+        #expect(p.display.channels.map(\.target) == [nil, "Target 203.5 °F", nil, nil, nil])
+        p.model.disappear()
+    }
+
+    @Test("a reached probe shows the mark and the local time it was reached; the grill never shows a mark")
+    func reached() async {
+        let at = Components.Schemas.TargetReached(reachedAt: fixedNow.addingTimeInterval(60))
+        let p = PanelHarness(cook: cook(
+            targets: .init(grill: 225, probe1: 203, probe2: 180, probe3: 160),
+            // probe3 has no reading: no mark. probe4 has no target: the
+            // server's state alone does not make a mark.
+            reached: .init(grill: at, probe1: at, probe3: at, probe4: at)
+        ))
+        await p.open()
+        p.hub.emit(LiveFixtures.temperature(grill: 230, probe1: 204, probe2: 170, probe4: 120))
+        let channels = p.model.display(at: fixedNow, locale: Self.enUS, timeZone: Self.utc).channels
+        #expect(channels.map(\.reached) == [nil, "✓ Reached 6:01\u{202F}PM", nil, nil, nil])
+        #expect(channels.map(\.target) == ["Target 225 °F", "Target 203 °F", "Target 180 °F", nil, nil])
+        #expect(channels.map(\.text) == ["230 °F", "204 °F", "170 °F", "—", "120 °F"])
+
+        let tokyo = p.model.display(at: fixedNow, locale: Self.enUS, timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        #expect(tokyo.channels[1].reached == "✓ Reached 3:01\u{202F}AM")
+        p.model.disappear()
+    }
+
+    @Test("the cook as re-read replaces the targets and reached state: a mark appears, then goes when the probe re-arms")
+    func cookChanged() async {
+        let p = PanelHarness(cook: cook(targets: .init(probe1: 203)))
+        await p.open()
+        p.hub.emit(LiveFixtures.temperature(grill: 225, probe1: 204))
+        func probe1() -> LivePanelDisplay.Channel {
+            p.model.display(at: fixedNow, locale: Self.enUS, timeZone: Self.utc).channels[1]
+        }
+        #expect(probe1().reached == nil)
+
+        let at = Components.Schemas.TargetReached(reachedAt: fixedNow)
+        p.model.cookChanged(cook(targets: .init(probe1: 203), reached: .init(probe1: at)))
+        #expect(probe1().reached == "✓ Reached 6:00\u{202F}PM")
+
+        p.model.cookChanged(cook(targets: .init(probe1: 203)))
+        #expect(probe1().reached == nil)
+        #expect(probe1().target == "Target 203 °F")
+
+        // Another cook's state is not this panel's.
+        var other = cook(targets: .init(probe1: 250), reached: .init(probe1: at))
+        other.id = "cook-2"
+        p.model.cookChanged(other)
+        #expect(probe1().target == "Target 203 °F")
+        #expect(probe1().reached == nil)
+        p.model.disappear()
+    }
+
     @Test("the reading time and its age, on the injected clock")
     func readingTime() async {
         let p = PanelHarness(configuration: .init(pollingInterval: 10))
@@ -812,11 +900,15 @@ struct LivePanelModelTests {
 @Suite("Cook detail with the live panel")
 @MainActor
 struct CookDetailLiveTests {
-    static func models(active: Cook) async -> (CooksModel, CookDetailModel, FakeHubs) {
+    /// `getCook` answers `GET /cooks/{cookId}`: `active`, unless the test says otherwise.
+    static func models(
+        active: Cook,
+        getCook: (@Sendable (Operations.GetCook.Input) async -> Operations.GetCook.Output)? = nil
+    ) async -> (CooksModel, CookDetailModel, FakeHubs) {
         let hubs = FakeHubs()
         let clock = VirtualClock()
         var api = CookFixtures.api(active: [active]) { _ in CookFixtures.page([active]) }
-        api.getCookHandler = { _ in .ok(.init(body: .json(active))) }
+        api.getCookHandler = getCook ?? { _ in .ok(.init(body: .json(active))) }
         api.negotiateHandler = { _ in .ok(.init(body: .json(LiveFixtures.info(1)))) }
         api.getCurrentTemperaturesHandler = { _ in .notFound(.init(body: .json(CookFixtures.error(.noReadings, "none")))) }
         let session = SessionModel(tokenProvider: FakeTokenProvider(account: DeviceFixtures.account), api: api)
@@ -852,6 +944,110 @@ struct CookDetailLiveTests {
         #expect(try #require(hubs.latest).stops == 1)
         #expect(cooks.cooks.first == stopped)
         #expect(cooks.devices.activeCook(for: try #require(cooks.devices.device(id: "box"))) == nil)
+    }
+
+    @Test("each pushed reading re-reads the cook: a reached mark appears and clears with no refresh")
+    func reachedFollowsTheServer() async throws {
+        var active = CookFixtures.cook("c1", device: "box", status: .active, name: "Brisket")
+        active.targetTemps = .init(grill: 225, probe1: 203)
+        var reached = active
+        // The server says the grill and probe 1 are reached; the app shows
+        // what it says and runs no rule of its own.
+        reached.targetsReached = .init(
+            grill: .init(reachedAt: fixedNow), probe1: .init(reachedAt: fixedNow.addingTimeInterval(5))
+        )
+        let served = Box(active)
+        let reads = Box(0)
+        let (_, detail, hubs) = await Self.models(active: active) { _ in
+            reads.value += 1
+            return .ok(.init(body: .json(served.value)))
+        }
+        detail.appear()
+        await detail.start()
+        let live = try #require(detail.live)
+        await until("connected") { live.status == .connected }
+        #expect(reads.value == 1)
+        func marks() -> [String?] {
+            live.display(at: fixedNow, locale: Locale(identifier: "en_US"), timeZone: TimeZone(identifier: "UTC")!)
+                .channels.map(\.reached)
+        }
+
+        // A reading 210 °F against 203 °F: the app does not decide on its own.
+        served.value = reached
+        let hub = try #require(hubs.latest)
+        hub.emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 210))
+        #expect(marks() == [nil, nil, nil, nil, nil])
+        await until("the cook re-read") { reads.value == 2 && detail.cook == reached }
+        #expect(marks() == [nil, "✓ Reached 6:00\u{202F}PM", nil, nil, nil])
+        #expect(live.display().channels.map(\.target).prefix(2) == ["Target 225 °F", "Target 203 °F"])
+
+        // The probe re-armed on the server: the mark goes on the next reading.
+        var rearmed = active
+        rearmed.targetsReached = .init(grill: .init(reachedAt: fixedNow))
+        served.value = rearmed
+        hub.emit(LiveFixtures.temperature(at: 10, grill: 230, probe1: 180))
+        await until("the cook re-read again") { reads.value == 3 && detail.cook == rearmed }
+        #expect(marks() == [nil, nil, nil, nil, nil])
+        #expect(detail.isActive)
+        detail.disappear()
+    }
+
+    @Test("readings during a re-read cost one more re-read, not one each; a failed re-read keeps the cook on screen")
+    func reReadsAreSingleFlight() async throws {
+        let active = CookFixtures.cook("c1", device: "box", status: .active)
+        let reads = Box(0)
+        let gate = Gate()
+        let (_, detail, hubs) = await Self.models(active: active) { _ in
+            reads.value += 1
+            if reads.value == 2 { await gate.pass() }
+            if reads.value == 3 { return .internalServerError(.init(body: .json(CookFixtures.error(.internalServerError, "boom")))) }
+            return .ok(.init(body: .json(active)))
+        }
+        detail.appear()
+        await detail.start()
+        let live = try #require(detail.live)
+        await until("connected") { live.status == .connected }
+        let hub = try #require(hubs.latest)
+
+        hub.emit(LiveFixtures.temperature(at: 5))
+        await gate.waitUntilEntered()
+        hub.emit(LiveFixtures.temperature(at: 10))
+        hub.emit(LiveFixtures.temperature(at: 15))
+        #expect(reads.value == 2)
+        gate.open()
+        await until("one more re-read") { reads.value == 3 && !detail.isReReading }
+        #expect(detail.cook == active)
+        #expect(detail.live === live)
+        detail.disappear()
+    }
+
+    @Test("a re-read answered after the cook stopped on this screen is dropped: the cook stays stopped")
+    func staleReReadIsDropped() async throws {
+        let active = CookFixtures.cook("c1", device: "box", status: .active)
+        var stopped = active
+        stopped.status = .completed
+        stopped.endTime = fixedNow
+        let reads = Box(0)
+        let gate = Gate()
+        let (_, detail, hubs) = await Self.models(active: active) { _ in
+            reads.value += 1
+            if reads.value == 2 { await gate.pass() }
+            return .ok(.init(body: .json(active)))
+        }
+        detail.appear()
+        await detail.start()
+        let live = try #require(detail.live)
+        await until("connected") { live.status == .connected }
+
+        try #require(hubs.latest).emit(LiveFixtures.temperature(at: 5))
+        await gate.waitUntilEntered()
+        try #require(hubs.latest).emit(LiveFixtures.cookStopped(stopped))
+        #expect(detail.cook == stopped)
+        gate.open()
+        await until("the re-read answered") { !detail.isReReading }
+        #expect(detail.cook == stopped)
+        #expect(detail.live == nil)
+        #expect(hubs.hubs.count == 1)
     }
 
     @Test("a completed cook has no live panel; without live services there is none")

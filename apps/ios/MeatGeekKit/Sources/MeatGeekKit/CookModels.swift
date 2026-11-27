@@ -168,6 +168,13 @@ public final class CookDetailModel {
     /// panel, including one made after the cook loads.
     @ObservationIgnored private var visible = false
     @ObservationIgnored private var appActive = true
+    /// A re-read after a pushed reading is under way.
+    @ObservationIgnored public private(set) var isReReading = false
+    /// A reading arrived during the re-read: read once more after it.
+    @ObservationIgnored private var reReadAgain = false
+    /// Counts `show(_:)`, so a re-read answered after a newer cook was shown
+    /// (a stop, a reload, `cook_stopped`) is dropped.
+    @ObservationIgnored private var shown = 0
 
     public init(cookID: String, cooks: CooksModel) {
         self.cookID = cookID
@@ -275,8 +282,10 @@ public final class CookDetailModel {
     }
 
     /// Shows `cook`, and keeps the live panel in step: one for an active
-    /// cook, none once it has ended.
+    /// cook, given the cook's targets and reached state each time it is
+    /// read, and none once it has ended.
     private func show(_ cook: Cook) {
+        shown += 1
         state = .loaded(cook)
         if chart == nil {
             let devices = cooks.devices
@@ -287,7 +296,11 @@ public final class CookDetailModel {
         }
         chart?.cookStatus(cook.status)
         if cook.status == .active {
-            guard live == nil, let services = cooks.live else { return }
+            if let live {
+                live.cookChanged(cook)
+                return
+            }
+            guard let services = cooks.live else { return }
             let devices = cooks.devices
             let deviceID = cook.deviceId
             live = LivePanelModel(
@@ -297,13 +310,53 @@ public final class CookDetailModel {
                 services: services,
                 now: cooks.now,
                 onCookStopped: { [weak self] stopped in self?.cookStopped(stopped) },
-                onReading: { [weak self] message in self?.chart?.append(message) }
+                onReading: { [weak self] message in
+                    self?.chart?.append(message)
+                    self?.reReadAfterReading()
+                }
             )
             live?.setAppActive(appActive)
             if visible { live?.appear() }
         } else if let live {
             live.end(with: cook)
             self.live = nil
+        }
+    }
+
+    /// A pushed reading arrived: `GET /cooks/{cookId}` again, so the live
+    /// panel's targets and reached marks follow the server's state (the
+    /// server records them from the same readings). One re-read at a time;
+    /// readings that arrive during one cost one more after it. A failed
+    /// re-read changes nothing on screen: the next reading tries again.
+    private func reReadAfterReading() {
+        guard !isReReading else {
+            reReadAgain = true
+            return
+        }
+        isReReading = true
+        Task {
+            repeat {
+                reReadAgain = false
+                await reRead()
+            } while reReadAgain && live != nil
+            isReReading = false
+        }
+    }
+
+    private func reRead() async {
+        let id = cookID
+        let before = shown
+        guard let output = try? await cooks.session.perform({ api in try await api.getCook(path: .init(cookId: id)) })
+        else { return }
+        switch output {
+        case .ok(let ok):
+            guard let cook = try? ok.body.json, shown == before, live != nil else { return }
+            show(cook)
+            if cook.status != .active { cooks.apply(cook) }
+        case .unauthorized:
+            cooks.session.endSession()
+        default:
+            break
         }
     }
 
