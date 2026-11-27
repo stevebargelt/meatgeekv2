@@ -39,6 +39,9 @@ jobs:
           sudo xcode-select -s "/Applications/Xcode_26.6.app/Contents/Developer"
           xcodebuild -version
 
+      - name: Resolve Swift packages
+        run: xcodebuild -resolvePackageDependencies -project apps/ios/MeatGeek.xcodeproj -derivedDataPath "$RUNNER_TEMP/DerivedData" -skipPackagePluginValidation
+
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
@@ -63,3 +66,4 @@ jobs:
           plugins: mattpocock-skills@claude-plugins-official
           claude_args: |
             --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
+            --append-system-prompt "Swift packages are already resolved. Pass -derivedDataPath \"$RUNNER_TEMP/DerivedData\" -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
