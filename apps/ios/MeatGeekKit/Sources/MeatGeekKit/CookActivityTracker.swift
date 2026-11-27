@@ -181,7 +181,7 @@ public final class CookActivityTracker {
                 end(activity.id, content(current))
                 updateConnection()
             } else {
-                end(activity.id, CookActivityPresenter.gone(now: now()))
+                end(activity.id, CookActivityPresenter.gone(shown: activities.state(activity.id), now: now()))
             }
         case .cook(let cook) where cook.status != .active:
             if let current = tracked[cook.id], current.activityID == activity.id {
@@ -208,9 +208,11 @@ public final class CookActivityTracker {
         }
     }
 
+    /// Ends the activity with `state`, keeping the temperatures it shows
+    /// when the tracker has followed no reading for it.
     private func end(_ activityID: String, _ state: CookActivityContentState) {
         ended.insert(activityID)
-        activities.end(activityID, state)
+        activities.end(activityID, CookActivityPresenter.ending(state, shown: activities.state(activityID)))
     }
 
     /// Signed out: stops following readings, for good. A check still out is

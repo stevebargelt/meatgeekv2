@@ -592,7 +592,8 @@ later issues of #237.
 - **Data.** The activity's attributes (`cookId`, `cookName`, `startTime`) and
   content state (the latest reading's grill and probes in °F, the cook's
   targets, the device's unit, the reading's time, the probes' reached times
-  (`targetsReached`), the update's send time (`updatedAt`) and `ended`) are the spec's
+  (`targetsReached`), the update's send time (`updatedAt`), `ended` and the
+  cook's end (`endedAt`)) are the spec's
   `CookActivityAttributes` and `CookActivityContentState`
   (`libs/api-specs/spec/components/schemas/live-activity.yaml`), generated
   into `MeatGeekAPI` like every other type. `MeatGeekActivity` makes the
@@ -616,8 +617,14 @@ later issues of #237.
     has passed (`context.isStale`), the activity shows `as of 3:42 PM`, the
     last update's time, in place of the elapsed time. It does not say why.
   - **Ended**: a stopped (or missing) cook's activity ends showing `Cook
-    ended` with the last temperatures, stops ticking, and leaves the lock
-    screen 15 minutes after it ended (`CookActivityPresenter.dismissalDate`).
+    ended` with the last temperatures (the ones it shows, when the app
+    followed no reading for it: `CookActivityPresenter.ending`), stops
+    ticking, and leaves the lock screen 15 minutes after the cook's
+    `endTime`, or after it ended without one
+    (`CookActivityPresenter.dismissalDate`).
+  - The compact island's trailing side and the minimal island have their
+    own text (`islandTrailing`, `islandMinimal`): `as of 3:42 PM` when
+    stale, `Ended` once ended.
 
   The views (`CookActivityLockScreenView` and the `CookActivityIsland*Views`,
   MeatGeekActivity) take only the resulting `CookActivityPresentation`.
@@ -629,8 +636,9 @@ later issues of #237.
   running cook after each reading goes to `cookRead(_:)`, so the activity
   takes the cook's reached probes as the server records them; with the cook
   screen closed nothing re-reads the cook, so a mark waits for the cook screen
-to open again or for the server's updates by push (a later issue of #237). While it tracks an activity and
-  the app is active, the tracker holds its own `LiveConnection`, separate from
+  to open again or for the server's updates by push (a later issue of #237).
+  While it tracks an activity and the app is active, the tracker holds its
+  own `LiveConnection`, separate from
   the cook screen's, and each `temperature` message from a tracked cook's
   device updates that activity; `cook_stopped` ends it. Each time the app
   becomes active (launch included), the tracker reads the cook of every

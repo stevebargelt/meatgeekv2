@@ -3725,7 +3725,12 @@ components:
           description: |
             The cook has stopped: the activity shows "Cook ended" with these last
             temperatures, and leaves the lock screen 15 minutes after
-            `updatedAt`. Absent: the cook is running.
+            `endedAt` (`updatedAt` without it). Absent: the cook is running.
+        endedAt:
+          type: string
+          description: |
+            When the cook ended (its `endTime`), ISO-8601 UTC, with `ended`.
+            Absent when the cook is running, or no longer exists.
     CookActivityTargetsReached:
       type: object
       description: |

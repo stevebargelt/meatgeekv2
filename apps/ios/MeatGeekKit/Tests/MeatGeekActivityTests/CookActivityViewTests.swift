@@ -21,7 +21,8 @@ struct CookActivityViewTests {
     ) -> CookActivityPresentation {
         CookActivityPresentation(
             cookName: "Brisket", startedAt: status == .ended ? nil : start, grill: "224° / 225°", probes: probes,
-            island: island, status: status, url: CookLink.url(cookID: "cook-1")
+            island: island, islandTrailing: status == .ended ? "Ended" : status.note ?? island.text,
+            islandMinimal: status == .ended ? "Ended" : "187°", status: status, url: CookLink.url(cookID: "cook-1")
         )
     }
 

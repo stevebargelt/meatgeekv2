@@ -26,7 +26,7 @@ final class FakeLiveActivities: LiveActivities {
     /// What the system is already showing (e.g. from an earlier launch).
     var shown: [RunningCookActivity] = []
     private(set) var calls: [Call] = []
-    private(set) var states: [String: CookActivityContentState] = [:]
+    var states: [String: CookActivityContentState] = [:]
     private(set) var attributes: [String: CookActivityAttributes] = [:]
     private var next = 0
 
@@ -47,6 +47,8 @@ final class FakeLiveActivities: LiveActivities {
         calls.append(.update(id: id))
         states[id] = state
     }
+
+    func state(_ id: String) -> CookActivityContentState? { states[id] }
 
     func end(_ id: String, _ state: CookActivityContentState) {
         calls.append(.end(id: id))
@@ -152,9 +154,44 @@ struct CookActivityPresenterTests {
 
         cook.status = .completed
         #expect(CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow).ended == true)
-        #expect(CookActivityPresenter.gone(now: fixedNow) == .init(
+        #expect(CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow).endedAt == nil)
+        cook.endTime = fixedNow.addingTimeInterval(-3600)
+        let ended = CookActivityPresenter.content(for: cook, reading: nil, unit: .fahrenheit, now: fixedNow)
+        #expect(ended.endedAt == "2026-11-22T17:00:00.000Z")
+        #expect(CookActivityPresenter.gone(shown: nil, now: fixedNow) == .init(
             temperatureUnit: .fahrenheit, updatedAt: "2026-11-22T18:00:00.000Z", ended: true
         ))
+    }
+
+    @Test("an activity ended with no reading of its own keeps the temperatures it shows; a gone cook's keeps all it shows")
+    func endingKeepsLastTemperatures() {
+        let shown = CookActivityContentState(
+            grillTemp: 224, probe1Temp: 204, targetTemps: .init(probe1: 203), temperatureUnit: .celsius,
+            readingTime: "2026-11-22T17:59:00.000Z", updatedAt: "2026-11-22T17:59:00.000Z"
+        )
+        let end = CookActivityContentState(
+            targetTemps: .init(probe1: 203), temperatureUnit: .celsius, updatedAt: "2026-11-22T18:00:00.000Z", ended: true
+        )
+        let kept = CookActivityPresenter.ending(end, shown: shown)
+        #expect(kept.grillTemp == 224)
+        #expect(kept.probe1Temp == 204)
+        #expect(kept.readingTime == "2026-11-22T17:59:00.000Z")
+        #expect(kept.updatedAt == "2026-11-22T18:00:00.000Z")
+        #expect(kept.ended == true)
+        #expect(CookActivityPresenter.ending(end, shown: nil) == end)
+
+        // An end with its own reading keeps it.
+        var withReading = end
+        withReading.grillTemp = 230
+        #expect(CookActivityPresenter.ending(withReading, shown: shown) == withReading)
+
+        let gone = CookActivityPresenter.gone(shown: shown, now: fixedNow)
+        #expect(gone.grillTemp == 224)
+        #expect(gone.probe1Temp == 204)
+        #expect(gone.targetTemps == .init(probe1: 203))
+        #expect(gone.temperatureUnit == .celsius)
+        #expect(gone.ended == true)
+        #expect(gone.updatedAt == "2026-11-22T18:00:00.000Z")
     }
 }
 
@@ -289,6 +326,31 @@ struct CookActivityStatesTests {
         #expect(shown.probes == [.init(label: "Probe 1", text: "204° → 203°")])
         #expect(CookActivityPresenter.dismissalDate(for: state) == fixedNow.addingTimeInterval(60 + 15 * 60))
         #expect(CookActivityPresenter.dismissalDate(for: Self.state(updatedAt: nil, ended: true)) == nil)
+
+        // Ended long after the cook stopped: 15 minutes after the stop.
+        var late = state
+        late.endedAt = Self.iso(-3600)
+        #expect(CookActivityPresenter.dismissalDate(for: late) == fixedNow.addingTimeInterval(-3600 + 15 * 60))
+    }
+
+    @Test("the compact island shows the island's text, \"as of\" when stale, \"Ended\" once ended; the minimal one the reading alone")
+    func islandCompactAndMinimal() {
+        let targets = Components.Schemas.TargetTemperatures(grill: 225, probe1: 203)
+        let current = Self.present(Self.state(probe1: 187, targets: targets, updatedAt: Self.iso(42 * 60)))
+        #expect(current.islandTrailing == "187° → 203°")
+        #expect(current.islandMinimal == "187°")
+
+        let stale = Self.present(Self.state(probe1: 187, targets: targets, updatedAt: Self.iso(42 * 60)), isStale: true)
+        #expect(stale.islandTrailing == "as of 6:42\u{202F}PM")
+        #expect(stale.islandMinimal == "187°")
+
+        let ended = Self.present(Self.state(probe1: 204, targets: targets, ended: true))
+        #expect(ended.islandTrailing == "Ended")
+        #expect(ended.islandMinimal == "Ended")
+
+        let grill = Self.present(Self.state(targets: .init(grill: 225)))
+        #expect(grill.islandTrailing == "224° / 225°")
+        #expect(grill.islandMinimal == "224°")
     }
 }
 
@@ -589,17 +651,29 @@ struct CookActivityTrackerTests {
         let h = ActivityHarness()
         await h.open()
         h.port.shown = [.init(id: "earlier", cookID: "cook-1")]
+        h.port.states["earlier"] = .init(grillTemp: 224, probe1Temp: 204, temperatureUnit: .fahrenheit)
         h.apiCook.value = Self.stopped(Self.active())
         h.tracker.setAppActive(true)
         await until("ended") { h.port.calls == [.end(id: "earlier")] }
         #expect(h.tracker.trackedCookIDs.isEmpty)
         #expect(!h.tracker.isConnected)
+        // "Cook ended" with the last temperatures it showed, gone 15 minutes after the stop.
+        let ended = try #require(h.port.states["earlier"])
+        #expect(ended.ended == true)
+        #expect(ended.grillTemp == 224)
+        #expect(ended.probe1Temp == 204)
+        #expect(CookActivityPresenter.dismissalDate(for: ended) == fixedNow.addingTimeInterval(3600 + 15 * 60))
 
         h.port.shown = [.init(id: "other-account", cookID: "cook-9")]
+        h.port.states["other-account"] = .init(grillTemp: 230, temperatureUnit: .celsius)
         h.apiCook.value = nil
         h.tracker.setAppActive(false)
         h.tracker.setAppActive(true)
         await until("ended") { h.port.calls.last == .end(id: "other-account") }
+        let gone = try #require(h.port.states["other-account"])
+        #expect(gone.ended == true)
+        #expect(gone.grillTemp == 230)
+        #expect(gone.temperatureUnit == .celsius)
     }
 
     @Test("a cook stopped on the web while the app was in the background ends its activity on return")

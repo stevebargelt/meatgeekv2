@@ -97,8 +97,8 @@ public struct CookActivityIslandLeadingView: View {
     }
 }
 
-/// The Dynamic Island's compact trailing side: the island channel's text
-/// ("187° → 203°", "204° ✓"), or the status note when stale or ended.
+/// The Dynamic Island's compact trailing side: `islandTrailing` ("187° →
+/// 203°", "204° ✓", "as of 3:42 PM", "Ended").
 public struct CookActivityIslandTrailingView: View {
     public let presentation: CookActivityPresentation
 
@@ -107,7 +107,7 @@ public struct CookActivityIslandTrailingView: View {
     }
 
     public var body: some View {
-        Text(presentation.status == .ended ? "Ended" : presentation.island.text)
+        Text(presentation.islandTrailing)
             .font(.caption.monospacedDigit().weight(.semibold))
             .foregroundStyle(presentation.status == .current ? .primary : .secondary)
             .lineLimit(1)
@@ -115,7 +115,7 @@ public struct CookActivityIslandTrailingView: View {
     }
 }
 
-/// The Dynamic Island's minimal presentation: the island channel's text alone.
+/// The Dynamic Island's minimal presentation: `islandMinimal` ("187°", "Ended").
 public struct CookActivityIslandMinimalView: View {
     public let presentation: CookActivityPresentation
 
@@ -124,7 +124,7 @@ public struct CookActivityIslandMinimalView: View {
     }
 
     public var body: some View {
-        Text(presentation.status == .ended ? "✓" : presentation.island.text.components(separatedBy: " ").first ?? "")
+        Text(presentation.islandMinimal)
             .font(.caption2.monospacedDigit().weight(.semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.5)

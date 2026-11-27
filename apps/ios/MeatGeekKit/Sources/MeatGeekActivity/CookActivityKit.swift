@@ -44,6 +44,12 @@ public final class ActivityKitLiveActivities: LiveActivities {
         enqueue { await Self.activity(id)?.update(Self.content(state)) }
     }
 
+    /// What the system shows for the activity now (an update still queued
+    /// is not in it yet).
+    public func state(_ id: String) -> CookActivityContentState? {
+        Self.activity(id)?.content.state
+    }
+
     /// Shows "Cook ended" and leaves the lock screen 15 minutes later
     /// (`CookActivityPresenter.dismissalDate(for:)`).
     public func end(_ id: String, _ state: CookActivityContentState) {
