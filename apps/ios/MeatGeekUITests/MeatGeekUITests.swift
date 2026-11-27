@@ -40,6 +40,8 @@ final class MeatGeekUITests: XCTestCase {
         static let chartRetry = "chart.retry"
         static let liveBadge = "live.badge"
         static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
+        static func liveTarget(_ channel: String) -> String { "live.target.\(channel)" }
+        static func liveReached(_ channel: String) -> String { "live.reached.\(channel)" }
         static let liveTestMenu = "live.test.menu"
         static let liveTestDrop = "live.test.drop"
         static let liveTestReconnect = "live.test.reconnect"
@@ -364,6 +366,13 @@ final class MeatGeekUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts[ID.liveChannel("probe1")].label, "Probe 1, 150 °F")
         XCTAssertEqual(app.staticTexts[ID.liveChannel("probe2")].label, "Probe 2, —")
         XCTAssertEqual(app.staticTexts[ID.liveChannel("probe4")].label, "Probe 4, —")
+        // The probe 1 target set on the form, beside its reading; no other
+        // channel has one, and nothing has reached its target.
+        let probe1Target = app.staticTexts[ID.liveTarget("probe1")]
+        waitUntilExists(probe1Target, "probe 1's target on the live screen")
+        XCTAssertEqual(probe1Target.label, "Probe 1, Target 203 °F")
+        XCTAssertFalse(app.staticTexts[ID.liveTarget("grill")].exists)
+        XCTAssertFalse(app.staticTexts[ID.liveReached("probe1")].exists)
         waitUntilLabel(badge, "Live", "the live badge")
         screenshot(app, "4-live-panel-live")
 
