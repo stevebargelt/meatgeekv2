@@ -11,6 +11,8 @@ name: Agent
 #   blocking: each is re-checked and started if nothing else blocks it.
 # - "Run workflow" (or `gh workflow run agent.yml -f issue=N`) starts one by hand,
 #   through the same checks.
+# - While the agent works the issue carries the agent-working label and a comment
+#   linking the run; the label comes off when the run ends.
 # - Setting the repository variable AGENT_PAUSED to true stops all of it.
 # Installed by the home repo's bin/install-agent-action; change the template there.
 on:
@@ -79,6 +81,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       ISSUE: ${{ github.event.inputs.issue || github.event.issue.number }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - id: check
         run: |
@@ -88,6 +91,11 @@ jobs:
           skip() { echo "Not starting #$ISSUE: $1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0; }
 
           read -r state labels < <(gh api "repos/$REPO/issues/$ISSUE" --jq '"\(.state) ,\([.labels[].name]|join(",")),"')
+          # Runs for one issue never overlap (concurrency group), so an agent-working label
+          # seen here was left by a run that died before its result step.
+          if [[ "$labels" == *",agent-working,"* ]]; then
+            gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-working >/dev/null
+          fi
           [[ "$state" == open ]] || skip "it is $state"
           [[ "$labels" == *",ready-for-agent,"* ]] || skip "it is not labelled ready-for-agent"
           [[ "$labels" != *",ready-for-human,"* ]] || skip "it is labelled ready-for-human"
@@ -108,6 +116,10 @@ jobs:
           [[ -z "$pr" ]] || skip "pull request #$pr already closes it"
           echo "#$ISSUE is ready" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "ready=true" >> "$GITHUB_OUTPUT"
+          # Visible while the agent works: the label (in lists, searches, and on hover in a
+          # parent's sub-issue list) and a comment linking the live run.
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-working >/dev/null
+          gh issue comment "$ISSUE" --repo "$REPO" --body "Agent started: $RUN_URL" >/dev/null
 
   implement:
     needs: gate
@@ -139,7 +151,10 @@ jobs:
           go-version-file: apps/data-pusher/go.mod
           cache: false
 
-      - uses: anthropics/claude-code-action@v1
+      # Every Bash command is allowed: Bash(node:*) alone already runs arbitrary code,
+      # and the runner is thrown away after the run. A narrow list only made runs fail.
+      - id: claude
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The release job starts runs with the workflow token, so their actor is the
@@ -147,9 +162,12 @@ jobs:
           allowed_bots: "github-actions,github-actions[bot]"
           plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
           plugins: mattpocock-skills@claude-plugins-official
+          # Same model and effort as the owner's interactive sessions; the action defaults to Sonnet.
+          settings: '{"effortLevel": "medium"}'
           claude_args: |
+            --model claude-opus-5-5
             --permission-mode acceptEdits
-            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
+            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,WebFetch,Bash"
             --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
           prompt: |
             You are working on issue #${{ needs.gate.outputs.issue }} in ${{ github.repository }}, with no one watching.
@@ -179,14 +197,28 @@ jobs:
           REPO: ${{ github.repository }}
           ISSUE: ${{ needs.gate.outputs.issue }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
+          gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-working >/dev/null || true
           # Not --search: the search index lags the pull request the agent just opened.
           pr=$(gh pr list --repo "$REPO" --state open --limit 200 --json url,body \
             --jq "[.[] | select(.body // \"\" | test(\"(?i)\\\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #$ISSUE\\\\b\"))][0].url // empty")
           if [[ -n "$pr" ]]; then echo "#$ISSUE: $pr" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
           labels=$(gh api "repos/$REPO/issues/$ISSUE" --jq '[.labels[].name] | join(",")')
           if [[ ",$labels," != *",ready-for-agent,"* ]]; then echo "#$ISSUE: parked by the agent" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          gh issue comment "$ISSUE" --repo "$REPO" --body "The agent run ended without a pull request and without saying why: $RUN_URL. Moved to ready-for-human."
+          # What the agent last said, and what it was stopped from running, from its transcript.
+          said="(no transcript)"; denied=""
+          if [[ -n "${EXECUTION_FILE:-}" && -f "$EXECUTION_FILE" ]]; then
+            said=$(jq -r '[.[] | select(.type == "result")] | last | .result // "(no final message)"' "$EXECUTION_FILE" | head -c 3000)
+            denied=$(jq -r '[.[] | select(.type == "result")] | last | .permission_denials // [] | .[] |
+              "- `\(.tool_name)`: `\((.tool_input.command // .tool_input.file_path // "") | tostring | .[0:160])`"' "$EXECUTION_FILE" | sort -u | head -20)
+          fi
+          {
+            echo "The agent run ended without a pull request: $RUN_URL. Moved to ready-for-human."
+            echo; echo "**Its last message:**"; echo; echo "$said" | sed 's/^/> /'
+            if [[ -n "$denied" ]]; then echo; echo "**Tool calls it was not allowed to make:**"; echo "$denied"; fi
+          } > "$RUNNER_TEMP/parked.md"
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file "$RUNNER_TEMP/parked.md"
           gh issue edit "$ISSUE" --repo "$REPO" --remove-label ready-for-agent --add-label ready-for-human
           echo "#$ISSUE: no pull request; moved to ready-for-human" | tee -a "$GITHUB_STEP_SUMMARY"
