@@ -34,6 +34,7 @@ public final class CookActivityTracker {
     private let activities: any LiveActivities
     private let live: LiveServices?
     private let unit: @MainActor (String) -> TemperatureUnit
+    private let now: @Sendable () -> Date
     private var tracked: [String: Tracked] = [:]
     private var connection: LiveConnection?
     private var appActive = true
@@ -50,16 +51,20 @@ public final class CookActivityTracker {
     public var onCookStopped: @MainActor (Cook) -> Void = { _ in }
 
     /// - Parameters:
+    ///   - now: the clock each update's send time (`updatedAt`) is read
+    ///     from: the activity goes stale three minutes after it.
     ///   - unit: the unit of the device with this id.
     public init(
         session: SessionModel,
         activities: any LiveActivities,
         live: LiveServices?,
+        now: @escaping @Sendable () -> Date = { Date() },
         unit: @escaping @MainActor (String) -> TemperatureUnit
     ) {
         self.session = session
         self.activities = activities
         self.live = live
+        self.now = now
         self.unit = unit
     }
 
@@ -95,6 +100,22 @@ public final class CookActivityTracker {
             }
         }
         updateConnection()
+    }
+
+    /// The cook as the API returned it again (the cook screen re-reads it
+    /// after each reading): a tracked running cook's activity takes its
+    /// targets and reached probes, so a reached mark shows and clears. Starts
+    /// nothing; a cook that is not running goes to `cookChanged(_:)`.
+    public func cookRead(_ cook: Cook) {
+        guard !stopped else { return }
+        guard cook.status == .active else {
+            if tracked[cook.id] != nil { cookChanged(cook) }
+            return
+        }
+        guard var current = tracked[cook.id], current.cook != cook else { return }
+        current.cook = cook
+        tracked[cook.id] = current
+        activities.update(current.activityID, content(current))
     }
 
     /// The scene phase: active, or not. Readings are followed only while
@@ -160,7 +181,7 @@ public final class CookActivityTracker {
                 end(activity.id, content(current))
                 updateConnection()
             } else {
-                end(activity.id, CookActivityContentState(temperatureUnit: .fahrenheit))
+                end(activity.id, CookActivityPresenter.gone(shown: activities.state(activity.id), now: now()))
             }
         case .cook(let cook) where cook.status != .active:
             if let current = tracked[cook.id], current.activityID == activity.id {
@@ -187,9 +208,11 @@ public final class CookActivityTracker {
         }
     }
 
+    /// Ends the activity with `state`, keeping the temperatures it shows
+    /// when the tracker has followed no reading for it.
     private func end(_ activityID: String, _ state: CookActivityContentState) {
         ended.insert(activityID)
-        activities.end(activityID, state)
+        activities.end(activityID, CookActivityPresenter.ending(state, shown: activities.state(activityID)))
     }
 
     /// Signed out: stops following readings, for good. A check still out is
@@ -217,7 +240,7 @@ public final class CookActivityTracker {
     }
 
     private func content(_ tracked: Tracked) -> CookActivityContentState {
-        CookActivityPresenter.content(for: tracked.cook, reading: tracked.reading, unit: unit(tracked.cook.deviceId))
+        CookActivityPresenter.content(for: tracked.cook, reading: tracked.reading, unit: unit(tracked.cook.deviceId), now: now())
     }
 
     private func updateConnection() {

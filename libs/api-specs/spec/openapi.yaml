@@ -276,3 +276,5 @@ components:
       $ref: './components/schemas/live-activity.yaml#/CookActivityAttributes'
     CookActivityContentState:
       $ref: './components/schemas/live-activity.yaml#/CookActivityContentState'
+    CookActivityTargetsReached:
+      $ref: './components/schemas/live-activity.yaml#/CookActivityTargetsReached'

@@ -29,7 +29,7 @@ public final class ActivityKitLiveActivities: LiveActivities {
     /// Throws when Live Activities are off (`ActivityAuthorizationError`) or
     /// the system refuses for any other reason.
     public func start(_ attributes: CookActivityAttributes, _ state: CookActivityContentState) throws -> String {
-        let activity = try Activity.request(attributes: attributes, content: .init(state: state, staleDate: nil), pushType: nil)
+        let activity = try Activity.request(attributes: attributes, content: Self.content(state), pushType: nil)
         return activity.id
     }
 
@@ -41,11 +41,26 @@ public final class ActivityKitLiveActivities: LiveActivities {
     // one at a time in the order they were asked for, so an older reading
     // never lands after a newer one, nor an update after its end.
     public func update(_ id: String, _ state: CookActivityContentState) {
-        enqueue { await Self.activity(id)?.update(.init(state: state, staleDate: nil)) }
+        enqueue { await Self.activity(id)?.update(Self.content(state)) }
     }
 
+    /// What the system shows for the activity now (an update still queued
+    /// is not in it yet).
+    public func state(_ id: String) -> CookActivityContentState? {
+        Self.activity(id)?.content.state
+    }
+
+    /// Shows "Cook ended" and leaves the lock screen 15 minutes later
+    /// (`CookActivityPresenter.dismissalDate(for:)`).
     public func end(_ id: String, _ state: CookActivityContentState) {
-        enqueue { await Self.activity(id)?.end(.init(state: state, staleDate: nil), dismissalPolicy: .immediate) }
+        let policy: ActivityUIDismissalPolicy = CookActivityPresenter.dismissalDate(for: state).map { .after($0) } ?? .default
+        enqueue { await Self.activity(id)?.end(Self.content(state), dismissalPolicy: policy) }
+    }
+
+    /// The state with its stale date: three minutes after it was sent
+    /// (`CookActivityPresenter.staleDate(for:)`).
+    private nonisolated static func content(_ state: CookActivityContentState) -> ActivityContent<CookActivityContentState> {
+        ActivityContent(state: state, staleDate: CookActivityPresenter.staleDate(for: state))
     }
 
     private func enqueue(_ work: @escaping @Sendable () async -> Void) {
