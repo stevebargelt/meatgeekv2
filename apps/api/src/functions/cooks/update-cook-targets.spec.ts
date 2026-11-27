@@ -289,6 +289,41 @@ describe('PUT /cooks/{cookId}/targets', () => {
       await h.readings({ n: 3, probe1Temp: 185 });
       expect(h.stored()['targetsReached']).toEqual({ probe1: { reachedAt: at(3) } });
     });
+
+    it('does not count a redelivered reading already counted under the old target', async () => {
+      const h = new Harness();
+      h.seed({ targetTemps: { probe1: 165 } });
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+      expect(h.stored()['targetsReached']).toEqual({ probe1: { reachedAt: at(2) } });
+
+      const response = await h.put({ probe1: 168 });
+      // The watermark is stored only, never returned.
+      expect(bodyOf(response)).not.toHaveProperty('targetsSeen');
+      expect(h.stored()['targetsSeen']).toEqual({ probe1: at(2) });
+
+      // The event hub delivers the same batch again: nothing new was read.
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+      expect(h.stored()['targetsReached']).toBeUndefined();
+      expect(h.stored()['targetsPending']).toBeUndefined();
+
+      await h.readings({ n: 3, probe1Temp: 172 });
+      expect(h.stored()['targetsReached']).toBeUndefined();
+      await h.readings({ n: 4, probe1Temp: 172 });
+      expect(h.stored()['targetsReached']).toEqual({ probe1: { reachedAt: at(4) } });
+      expect(h.stored()['targetsSeen']).toBeUndefined();
+    });
+
+    it('keeps the watermark across a second change before any new reading', async () => {
+      const h = new Harness();
+      h.seed({ targetTemps: { probe1: 165 }, targetsReached: { probe1: { reachedAt: at(2) } } });
+
+      await h.put({ probe1: 168 });
+      await h.put({ probe1: 166 });
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+
+      expect(h.stored()['targetsSeen']).toEqual({ probe1: at(2) });
+      expect(h.stored()['targetsReached']).toBeUndefined();
+    });
   });
 
   describe('limits (as POST /cooks)', () => {

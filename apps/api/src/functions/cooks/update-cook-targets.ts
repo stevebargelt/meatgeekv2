@@ -23,7 +23,7 @@ import {
 } from '../devices/devices-http';
 import { validateCookTargets } from './cook-requests';
 import { deviceNotOwnedBody } from './device-ownership';
-import { retarget } from './target-rule';
+import { nonEmpty, retarget } from './target-rule';
 
 /**
  * #240 — PUT /cooks/{cookId}/targets: set, change and clear the targets of one
@@ -70,10 +70,6 @@ const defaultDeps: UpdateCookTargetsDeps = {
   getDeviceOwnership,
 };
 
-function nonEmpty<T extends object>(map: T): T | undefined {
-  return Object.keys(map).length > 0 ? map : undefined;
-}
-
 /** The fields to write for `targets`, or `undefined` when nothing changes. */
 function targetChange(
   cook: StoredCookDocument,
@@ -82,6 +78,7 @@ function targetChange(
   const before = {
     targetsReached: cook.targetsReached ?? {},
     targetsPending: cook.targetsPending ?? {},
+    targetsSeen: cook.targetsSeen,
   };
   const after = retarget(before, cook.targetTemps, targets);
   const sameTargets =
@@ -94,6 +91,7 @@ function targetChange(
     targetTemps: nonEmpty(targets),
     targetsReached: nonEmpty(after.targetsReached),
     targetsPending: nonEmpty(after.targetsPending),
+    targetsSeen: nonEmpty(after.targetsSeen),
   };
 }
 

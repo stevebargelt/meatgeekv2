@@ -57,9 +57,11 @@ void cookFieldsAreExhaustive;
 type StoredCook = Cook;
 
 /** A stored cook with the fields that are stored but never returned: the target
- *  rule's pending readings (see apps/api/src/functions/cooks/target-rule.ts). */
+ *  rule's pending readings and, per re-armed channel, the newest reading time
+ *  already counted (see apps/api/src/functions/cooks/target-rule.ts). */
 export interface StoredCookDocument extends Cook {
   targetsPending?: TargetsPending;
+  targetsSeen?: TargetsPending;
 }
 
 /** What {@link CooksRepository.updateActiveCook} did. */
