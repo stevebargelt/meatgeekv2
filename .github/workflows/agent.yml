@@ -184,8 +184,10 @@ jobs:
                and listed in the pull request.
             3. Commit on your branch following AGENTS.md's commit conventions, referencing `#${{ needs.gate.outputs.issue }}`.
             4. Push, then `gh pr create --draft --base ${{ github.event.repository.default_branch }} --fill-first` with a
-               body that starts with `Closes #${{ needs.gate.outputs.issue }}` and ends with a "Left undone" section:
-               anything you did not do and why, or "Nothing". A separate review agent reviews the draft next.
+               body that starts with `Closes #${{ needs.gate.outputs.issue }}` and ends with two sections:
+               "Left undone": only what merging needs first (a missing step, a secret, a workflow edit you may not
+               push), or "Nothing"; and "Check by hand later": proofs that can only happen after merging, such as
+               on a real phone or on dev, or "Nothing". A separate review agent reviews the draft next.
 
             If you cannot get the checks green, do not open a pull request. Instead comment
             on the issue with what you tried and where it stuck, and run
