@@ -59,9 +59,12 @@ import { applyReadings, nonEmpty, type TargetState } from './target-rule';
  * retries the batch (the retry policy is on the registration in main.ts). The
  * rule ignores a reading it has already counted, so a retried batch does not
  * count a reading twice; an alert already recorded is not sent again. An
- * alert Apple refused for another reason does not throw: it is sent again
- * with the cook's next batch. The one log line per batch carries counts only:
- * no ids and no push token.
+ * alert Apple refused for another reason is an answer: it is recorded and
+ * not sent again. Missing APNs settings do not throw either, because a retry
+ * cannot fix them and would hold up the rule for every cook on the partition:
+ * nothing is sent or recorded, so the alert goes out (late-worded) with the
+ * cook's next batch once the settings are in place. The one log line per
+ * batch carries counts only: no ids and no push token.
  */
 
 /**
@@ -142,9 +145,17 @@ interface CookAlerts {
   readonly unanswered: number;
   readonly refused: number;
   readonly deadTokens: number;
+  /** Due alerts not sent because the APNs settings are missing. Not retried. */
+  readonly unconfigured: number;
 }
 
-const NO_ALERTS: CookAlerts = { accepted: 0, unanswered: 0, refused: 0, deadTokens: 0 };
+const NO_ALERTS: CookAlerts = {
+  accepted: 0,
+  unanswered: 0,
+  refused: 0,
+  deadTokens: 0,
+  unconfigured: 0,
+};
 
 /**
  * Sends the cook's due alerts and records the ones every phone answered.
@@ -164,10 +175,23 @@ async function alertCook(
   try {
     const store = deps.getPushTokens();
     const { tokens } = await store.listTokens(group.userId);
-    const unit = tokens.length > 0 ? await deps.temperatureUnitOf(group.userId, group.deviceId) : 'fahrenheit';
-    const apns = tokens.length > 0 ? deps.getApns() : undefined;
+    let send: ApnsClient['send'] = async () => {
+      throw new Error('no phone to send to');
+    };
+    let unit: TemperatureUnit = 'fahrenheit';
+    if (tokens.length > 0) {
+      let apns: Pick<ApnsClient, 'send'>;
+      try {
+        apns = deps.getApns();
+      } catch {
+        // The settings are missing: a retry cannot fix that. Left due.
+        return { ...NO_ALERTS, unconfigured: due.length };
+      }
+      send = push => apns.send(push);
+      unit = await deps.temperatureUnitOf(group.userId, group.deviceId);
+    }
     outcome = await sendAlerts(cook, due, tokens, unit, {
-      send: push => (apns as Pick<ApnsClient, 'send'>).send(push),
+      send,
       removeToken: async tokenId => {
         await store.remove(group.userId, tokenId);
       },
@@ -197,6 +221,7 @@ async function alertCook(
     unanswered,
     refused: outcome.refused,
     deadTokens: outcome.deadTokens,
+    unconfigured: 0,
   };
 }
 
@@ -281,7 +306,8 @@ export async function recordTargetsReachedHandler(
       ` notActive=${count('notActive')} failed=${failedCooks} untagged=${untagged}` +
       ` skipped=${skipped} unowned=${unowned} lookupFailed=${failedLookups}` +
       ` alertsAccepted=${sum('accepted')} alertsUnanswered=${unanswered}` +
-      ` alertsRefused=${sum('refused')} deadTokens=${sum('deadTokens')}`
+      ` alertsRefused=${sum('refused')} deadTokens=${sum('deadTokens')}` +
+      ` alertsUnconfigured=${sum('unconfigured')}`
   );
   if (failedCooks > 0 || failedLookups > 0 || unanswered > 0) {
     throw new TargetsNotRecordedError(failedCooks, failedLookups, unanswered);

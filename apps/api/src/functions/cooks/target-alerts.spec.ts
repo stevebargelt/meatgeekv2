@@ -1,3 +1,4 @@
+import { ApnsConfigError } from '../../shared/apns/apns-config';
 import { broadcastTemperatureHandler } from '../signalr/broadcast-temperature';
 import { pushTokenId } from '../../shared/cosmos/push-tokens-repository';
 import { recordTargetsReachedHandler, TargetsNotRecordedError } from './record-targets-reached';
@@ -215,7 +216,7 @@ describe('target alerts', () => {
     expect(h.apple.sent).toHaveLength(2);
   });
 
-  it('sends again with the next batch when Apple refused or was unavailable', async () => {
+  it('sends again when Apple was unavailable, and records a refusal as an answer', async () => {
     const h = new Harness();
     h.startCook({ probe1: 203 });
     await h.registerPhone(PHONE_1);
@@ -224,18 +225,34 @@ describe('target alerts', () => {
     await expect(h.send({ n: 1, probe1Temp: 204 }, { n: 2, probe1Temp: 205 })).rejects.toThrow(
       TargetsNotRecordedError
     );
+    h.apple.answers.set(PHONE_1, { status: 429, reason: 'TooManyRequests' });
+    await expect(h.send({ n: 3, probe1Temp: 205 })).rejects.toThrow(TargetsNotRecordedError);
 
-    // A refusal for another reason does not hold the batch up, and is not recorded.
+    // A refusal for another reason does not hold the batch up, and is final.
     h.apple.answers.set(PHONE_1, { status: 403, reason: 'InvalidProviderToken' });
-    await h.send({ n: 3, probe1Temp: 205 });
+    await h.send({ n: 4, probe1Temp: 205 });
 
     h.apple.answers.delete(PHONE_1);
-    await h.send({ n: 4, probe1Temp: 205 });
     await h.send({ n: 5, probe1Temp: 205 });
 
     expect(h.apple.sent).toHaveLength(3);
-    // Neither failure deleted the phone.
+    // No failure deleted the phone.
     expect(await h.phoneIds()).toEqual([pushTokenId(PHONE_1)]);
+  });
+
+  it("does not repeat an alert on a phone that accepted it when another phone's push is refused", async () => {
+    const h = new Harness();
+    h.startCook({ probe1: 203 });
+    await h.registerPhone(PHONE_1);
+    await h.registerPhone(PHONE_2);
+    h.apple.answers.set(PHONE_2, { status: 400, reason: 'DeviceTokenNotForTopic' });
+
+    await h.send({ n: 1, probe1Temp: 204 }, { n: 2, probe1Temp: 205 });
+    await h.send({ n: 3, probe1Temp: 205 });
+    await h.send({ n: 4, probe1Temp: 206 });
+
+    expect(h.apple.sent.map(r => r.deviceToken)).toEqual([PHONE_1, PHONE_2]);
+    expect(await h.phoneIds()).toHaveLength(2);
   });
 
   it('deletes a token Apple answers 410 or BadDeviceToken for, and keeps the others', async () => {
@@ -381,7 +398,7 @@ describe('target alerts', () => {
       expect((pushed[0] as Array<{ userId: string }>).map(m => m.userId)).toEqual([OWNER, OWNER]);
     });
 
-    it('retries when the phones cannot be read, or the APNs settings are missing, and still records the reach', async () => {
+    it('retries when the phones cannot be read, and still records the reach', async () => {
       const h = new Harness();
       h.startCook({ probe1: 203 });
       await h.registerPhone(PHONE_1);
@@ -392,18 +409,32 @@ describe('target alerts', () => {
       );
       expect((await h.cook()).targetsReached).toEqual({ probe1: { reachedAt: at(2) } });
 
-      const { events, context } = batchOf([{ n: 3, probe1Temp: 205 }]);
-      await expect(
-        recordTargetsReachedHandler(events, context, {
-          ...h.deps,
-          getApns: () => {
-            throw new Error('APNS_KEY_ID_missing');
-          },
-        })
-      ).rejects.toThrow(TargetsNotRecordedError);
-      expect(h.apple.sent).toHaveLength(0);
+      await h.send({ n: 3, probe1Temp: 205 });
+      expect(h.apple.titles()).toEqual(['Probe 1 reached 203 °F']);
+    });
 
-      await h.send({ n: 4, probe1Temp: 205 });
+    it('does not retry the batch when the APNs settings are missing, and sends once they are in place', async () => {
+      const h = new Harness();
+      h.startCook({ probe1: 203 });
+      await h.registerPhone(PHONE_1);
+      const { events, context } = batchOf([
+        { n: 1, probe1Temp: 204 },
+        { n: 2, probe1Temp: 205 },
+      ]);
+
+      // A retry cannot fix a missing setting, so the batch does not throw.
+      await recordTargetsReachedHandler(events, context, {
+        ...h.deps,
+        getApns: () => {
+          throw new ApnsConfigError('APNS_KEY_ID_missing');
+        },
+      });
+      expect(h.apple.sent).toHaveLength(0);
+      expect((await h.cook()).targetsReached).toEqual({ probe1: { reachedAt: at(2) } });
+      expect(logsOf(context).join('\n')).toContain('alertsUnconfigured=1');
+
+      // Not recorded: it goes out with the cook's next batch.
+      await h.send({ n: 3, probe1Temp: 205 });
       expect(h.apple.titles()).toEqual(['Probe 1 reached 203 °F']);
     });
   });

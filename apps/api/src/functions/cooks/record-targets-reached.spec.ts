@@ -332,7 +332,7 @@ describe('recordTargetsReachedHandler', () => {
     const logs = (context as unknown as { logs: string[] }).logs;
     expect(logs).toEqual([
       'recordTargetsReached cooks=1 updated=1 notActive=0 failed=0 untagged=1 skipped=0 unowned=0 lookupFailed=0' +
-        ' alertsAccepted=0 alertsUnanswered=0 alertsRefused=0 deadTokens=0',
+        ' alertsAccepted=0 alertsUnanswered=0 alertsRefused=0 deadTokens=0 alertsUnconfigured=0',
     ]);
     expect(logs.join('\n')).not.toMatch(/smoker|owner|cook-1/);
   });

@@ -329,9 +329,10 @@ model {
             registered, as a Time Sensitive notification ("Probe 1 reached 203 °F", body the cook's
             name, in the device's unit; a late reading adds "40 minutes ago"), one thread per cook.
             The reach is recorded as alerted on the cook (`targetsAlerted`, never returned) only
-            once every phone answered finally: accepted, or a dead token (410, BadDeviceToken),
-            which is deleted. No answer from Apple throws, so the host retries; any other refusal
-            is sent again with the next batch. A stopped cook sends nothing. Histogram
+            once every phone answered: accepted, a dead token (410, BadDeviceToken), which is
+            deleted, or another refusal, which keeps the token. No answer from Apple throws, so
+            the host retries; missing APNs settings do not, and the reach stays due. A stopped
+            cook sends nothing. Histogram
             meatgeek.alert.accept_lag_ms: from the reach to Apple accepting the alert (aim: under
             30 s).
           '''

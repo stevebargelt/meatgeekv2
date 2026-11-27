@@ -19,12 +19,15 @@ import type { StoredPushToken } from '../../shared/cosmos/push-tokens-repository
  * `reachedAt` and is due again; the grill never re-arms by falling, so it
  * alerts once per target.
  *
- * RECORDED ONLY ON ACCEPTANCE. A channel is recorded as alerted only when
- * every phone's push got a final answer: Apple accepted it (200), or the token
- * is dead (410, or 400 BadDeviceToken) and has been deleted. A push with no
- * answer (a network failure, a 5xx, a 429, a refusal for any other reason) is
- * not recorded, so the channel stays due and is sent again with the next
- * batch: a rare duplicate on a phone that did accept, never a missed alert.
+ * RECORDED ONLY ON AN ANSWER. A channel is recorded as alerted only when
+ * every phone's push got a final answer from Apple: accepted (200), the token
+ * is dead (410, or 400 BadDeviceToken) and has been deleted, or refused for
+ * another reason (the token is kept). A refusal is final because sending the
+ * same push again is refused the same way, and would repeat the alert on the
+ * phones that did accept it with every batch of the cook. A push with no
+ * answer (a network failure, a 5xx, a 429) is not recorded, so the channel
+ * stays due and is sent again: a rare duplicate on a phone that did accept,
+ * never a missed alert.
  * A user with no phones has nothing to send, and the channel is recorded so a
  * phone registered later is not sent an old alert.
  *
@@ -197,11 +200,12 @@ export interface AlertSenderDeps {
 }
 
 export interface AlertOutcome {
-  /** The due alerts every phone answered finally: recorded as alerted. */
+  /** The due alerts every phone answered: recorded as alerted. */
   readonly done: DueAlert[];
   readonly accepted: number;
   /** Pushes with no final answer: sent again with the next batch. */
   readonly unanswered: number;
+  /** Pushes Apple refused for a reason other than a dead token: final, not sent again. */
   readonly refused: number;
   readonly deadTokens: number;
 }
@@ -254,15 +258,14 @@ export async function sendAlerts(
         recordAcceptLag(histogram, alert.reachedAt, deps.now());
       } else if (isDeadToken(result)) {
         dead.add(token.id);
-      } else {
-        // Not accepted and not a dead token: Apple refused or was unavailable.
-        // Either way it did not go out; it is sent again.
-        if (result.status >= 500 || result.status === 429) {
-          unanswered += 1;
-        } else {
-          refused += 1;
-        }
+      } else if (result.status >= 500 || result.status === 429) {
+        // Apple was unavailable: no answer, so it is sent again.
+        unanswered += 1;
         final = false;
+      } else {
+        // Refused for another reason: an answer. Sending it again would be
+        // refused again and repeat the alert on the phones that accepted it.
+        refused += 1;
       }
     }
     if (final) {
