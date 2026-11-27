@@ -1,0 +1,77 @@
+# Lock-screen activity schemas (#271).
+#
+# The data of the iOS app's lock-screen activity: the Live Activity for one
+# running cook on one iPhone. These are NOT HTTP bodies. The app's
+# ActivityKit attributes and content state are these two types, generated
+# from this file (apps/ios/MeatGeekKit), so a server that starts or updates
+# an activity by push (a later issue) writes the same JSON the app decodes.
+#
+# Dates are ISO-8601 strings, not `format: date-time`: ActivityKit decodes a
+# push's `attributes` and `content-state` with a default JSONDecoder, which
+# reads a Swift Date as seconds since 2001, not as a string. A string field
+# reads the same on both sides.
+
+CookActivityAttributes:
+  type: object
+  description: |
+    What does not change while the activity runs: which cook it is, its name
+    and when it started. ActivityKit's attributes.
+  required:
+    - cookId
+    - cookName
+    - startTime
+  additionalProperties: false
+  properties:
+    cookId:
+      type: string
+      description: The cook's id. Tapping the activity opens this cook's live screen.
+    cookName:
+      type: string
+      description: The cook's name.
+    startTime:
+      type: string
+      description: |
+        The cook's `startTime`, ISO-8601 UTC (`new Date().toISOString()`).
+        The activity's elapsed time counts from it.
+
+CookActivityContentState:
+  type: object
+  description: |
+    What the activity shows now: the latest reading's temperatures in °F,
+    the cook's targets in °F, and the device's temperature unit the
+    activity converts them to. A channel with no value has no reading (an
+    unplugged probe); the activity leaves a probe with no reading out.
+    ActivityKit's content state.
+  required:
+    - temperatureUnit
+  additionalProperties: false
+  properties:
+    grillTemp:
+      type: number
+      format: double
+      description: The grill's latest reading, degrees F.
+    probe1Temp:
+      type: number
+      format: double
+      description: Probe 1's latest reading, degrees F.
+    probe2Temp:
+      type: number
+      format: double
+      description: Probe 2's latest reading, degrees F.
+    probe3Temp:
+      type: number
+      format: double
+      description: Probe 3's latest reading, degrees F.
+    probe4Temp:
+      type: number
+      format: double
+      description: Probe 4's latest reading, degrees F.
+    targetTemps:
+      $ref: './cook.yaml#/TargetTemperatures'
+    temperatureUnit:
+      $ref: './common.yaml#/TemperatureUnit'
+    readingTime:
+      type: string
+      description: |
+        The latest reading's `timestamp`, ISO-8601 UTC. Absent before the
+        first reading.

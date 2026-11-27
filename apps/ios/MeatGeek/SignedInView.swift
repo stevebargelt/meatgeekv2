@@ -4,32 +4,61 @@ import SwiftUI
 /// Signed in: the app's tabs, Cooks then Devices. Each tab's navigation bar
 /// carries the account menu. The tabs share one devices model and one cooks
 /// model, so a cook started on the Devices tab is on the Cooks tab too.
+///
+/// A running cook started here gets a lock-screen activity (the cooks
+/// model's `CookActivityTracker`); tapping it opens `meatgeek://cook/<id>`,
+/// which `MeatGeekApp` puts in `openCook`; this shows that cook's screen on
+/// the Cooks tab.
 struct SignedInView: View {
+    private enum TabID: Hashable { case cooks, devices }
+
     let session: SessionModel
     @State private var profile: ProfileModel
     @State private var devices: DevicesModel
     @State private var cooks: CooksModel
+    @State private var tab: TabID = .cooks
+    @State private var cooksPath: [Route] = []
+    @Environment(\.scenePhase) private var scenePhase
+    /// A cook to open, from a tapped lock-screen activity. Cleared once shown.
+    @Binding var openCook: String?
 
-    init(session: SessionModel, now: @escaping @Sendable () -> Date, live: LiveServices?) {
+    init(
+        session: SessionModel, now: @escaping @Sendable () -> Date, live: LiveServices?,
+        activities: (any LiveActivities)? = nil, activityLive: LiveServices? = nil,
+        openCook: Binding<String?> = .constant(nil)
+    ) {
         self.session = session
+        _openCook = openCook
         let devices = DevicesModel(session: session, now: now)
         _profile = State(initialValue: ProfileModel(session: session))
         _devices = State(initialValue: devices)
-        _cooks = State(initialValue: CooksModel(devices: devices, now: now, live: live))
+        _cooks = State(initialValue: CooksModel(
+            devices: devices, now: now, live: live, activities: activities, activityLive: activityLive
+        ))
     }
 
     var body: some View {
-        TabView {
-            Tab("Cooks", systemImage: "list.bullet.rectangle") {
-                CooksView(model: cooks, profile: profile, session: session)
+        TabView(selection: $tab) {
+            Tab("Cooks", systemImage: "list.bullet.rectangle", value: TabID.cooks) {
+                CooksView(model: cooks, profile: profile, session: session, path: $cooksPath)
             }
             .accessibilityIdentifier(AccessibilityID.cooksTab)
-            Tab("Devices", systemImage: "flame") {
+            Tab("Devices", systemImage: "flame", value: TabID.devices) {
                 DevicesView(model: devices, cooks: cooks, profile: profile, session: session)
             }
             .accessibilityIdentifier(AccessibilityID.devicesTab)
         }
         .task { await profile.load() }
+        .onChange(of: openCook, initial: true) { _, cookID in
+            guard let cookID else { return }
+            tab = .cooks
+            cooksPath = [.cook(cookID)]
+            openCook = nil
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            cooks.activities?.setAppActive(phase == .active)
+        }
+        .onDisappear { cooks.activities?.stop() }
     }
 }
 

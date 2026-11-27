@@ -6,6 +6,10 @@
 
   - CFBundleURLTypes: the msauth.<bundle id> scheme of MSAL's redirect URI
     (msauth.com.meatgeek.ios://auth).
+  - CFBundleURLTypes also has the meatgeek scheme: tapping a cook's
+    lock-screen activity opens meatgeek://cook/<id> (MeatGeekKit's CookLink).
+  - NSSupportsLiveActivities, NSSupportsLiveActivitiesFrequentUpdates: the
+    lock-screen activity (#271), held by the MeatGeekWidgets extension.
   - No LSApplicationQueriesSchemes (msauthv2/msauthv3): MSAL needs them only
     to look for the Microsoft Authenticator broker, which the app turns off
     (MSALTokenProvider, HAR-171). Sign-in is always in the system browser.
@@ -24,7 +28,19 @@
 				<string>msauth.$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).cook</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>meatgeek</string>
+			</array>
+		</dict>
 	</array>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>MeatGeekAPIBaseURL</key>
 	<string>$(MEATGEEK_API_BASE_URL)</string>
 	<key>MeatGeekTenantID</key>

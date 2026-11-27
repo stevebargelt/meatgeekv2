@@ -27,7 +27,7 @@ This is not an Nx project. `nx` does not build or test it; use Xcode or
 ```
 apps/ios/
 ├── MeatGeek.xcodeproj        # The app project (shared scheme: MeatGeek)
-├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests, MeatGeekLiveTests, MeatGeekMSALTests, MeatGeekUITests
+├── MeatGeek.xctestplan       # Test plan: MeatGeekKitTests, MeatGeekLiveTests, MeatGeekActivityTests, MeatGeekMSALTests, MeatGeekUITests
 ├── Live.xctestplan           # Test plan: MeatGeekLiveUITests, the live proof against dev
 ├── Config/                   # Build settings (xcconfig), see Signing below
 │   ├── Base.xcconfig         # Shared by every target and configuration
@@ -37,6 +37,7 @@ apps/ios/
 │   ├── MeatGeek-Info.plist   # Info.plist keys build settings cannot generate
 │   └── Signing.local.xcconfig.example
 ├── MeatGeek/                 # App target: a thin SwiftUI shell
+├── MeatGeekWidgets/          # Widget extension: holds the lock-screen activity
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
 ├── MeatGeekMSALTests/        # MSALTokenProvider against the real MSAL (XCTest, hosted in the app)
 ├── MeatGeekLiveUITests/      # The live iOS proof (XCUITest), see Run the tests
@@ -46,8 +47,10 @@ apps/ios/
     ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
     ├── Sources/MeatGeekMSAL/     # MSALTokenProvider: the only code that links MSAL
     ├── Sources/MeatGeekLive/     # SignalRLiveHub: the only code that links the SignalR client
+    ├── Sources/MeatGeekActivity/ # The lock-screen activity: ActivityKit adapter, views, widget
     ├── Tests/MeatGeekKitTests/   # Unit tests (Swift Testing)
-    └── Tests/MeatGeekLiveTests/  # Hub message decoding through the SignalR client (Swift Testing)
+    ├── Tests/MeatGeekLiveTests/  # Hub message decoding through the SignalR client (Swift Testing)
+    └── Tests/MeatGeekActivityTests/ # Renders the lock-screen view (Swift Testing)
 ```
 
 - **All logic goes in MeatGeekKit.** Models, formatting, the API client and
@@ -85,12 +88,15 @@ apps/ios/
 | `MeatGeek` | iOS app, display name "MeatGeek", portrait and landscape | `com.meatgeek.ios` |
 | `MeatGeekUITests` | UI tests | `com.meatgeek.ios.uitests` |
 | `MeatGeekLiveUITests` | UI tests: the live iOS proof, in `Live.xctestplan` only | `com.meatgeek.ios.liveuitests` |
+| `MeatGeekWidgets` | Widget extension, embedded in the app: the lock-screen activity | `com.meatgeek.ios.widgets` |
 | `MeatGeekKit` | Swift package library, `platforms: [.iOS(.v18)]`, Swift 6 mode | |
 | `MeatGeekAPI` | Swift package target in MeatGeekKit: the generated API client | |
 | `MeatGeekMSAL` | Swift package library in MeatGeekKit: `MSALTokenProvider`; the app links it, the tests do not | |
 | `MeatGeekLive` | Swift package library in MeatGeekKit: `SignalRLiveHub`; the app links it, `MeatGeekKitTests` does not | |
+| `MeatGeekActivity` | Swift package library in MeatGeekKit: the lock-screen activity's ActivityKit adapter, views and widget; the app and `MeatGeekWidgets` link it | |
 | `MeatGeekKitTests` | Swift package test target | |
 | `MeatGeekLiveTests` | Swift package test target: `MeatGeekLive`'s decoding | |
+| `MeatGeekActivityTests` | Swift package test target: renders the lock-screen view | |
 
 ## Prerequisites
 
@@ -139,8 +145,8 @@ xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
 ```
 
 The `MeatGeek` scheme's test action runs the `MeatGeek` test plan, which runs
-the four test targets: `MeatGeekKitTests` and `MeatGeekLiveTests` (Swift
-Testing, each reported as `✔ Test run with N tests … passed`),
+the five test targets: `MeatGeekKitTests`, `MeatGeekLiveTests` and
+`MeatGeekActivityTests` (Swift Testing, each reported as `✔ Test run with N tests … passed`),
 `MeatGeekMSALTests` and `MeatGeekUITests` (XCTest, reported as
 `Executed N tests, with 0 failures`). The command exits 0 only if all pass.
 Do not add `CODE_SIGNING_ALLOWED=NO`: `MeatGeekMSALTests` runs inside the app
@@ -560,6 +566,62 @@ new target on the live panel; `testCookStoppedEndsTheLiveCook` drives
 does (409 on an ended cook, a changed target loses its reached mark).
 The stub runs no target rule, so no reached mark shows in UI test mode; the
 marks are unit tested.
+
+## Lock-screen activity
+
+A cook started in the app shows on the lock screen as a Live Activity, kept
+current while the app runs, and ends when the cook stops (#271). Nothing here
+uses push, so it works in the simulator. Reached marks, the Dynamic Island and
+the stale and ended states are #272; starting and updating by push are later
+issues of #237.
+
+- **Data.** The activity's attributes (`cookId`, `cookName`, `startTime`) and
+  content state (the latest reading's grill and probes in °F, the cook's
+  targets, the device's unit, the reading's time) are the spec's
+  `CookActivityAttributes` and `CookActivityContentState`
+  (`libs/api-specs/spec/components/schemas/live-activity.yaml`), generated
+  into `MeatGeekAPI` like every other type. `MeatGeekActivity` makes the
+  generated attributes ActivityKit's `ActivityAttributes`, so a push and the
+  app carry the same JSON. Dates in them are ISO strings, not `date-time`:
+  ActivityKit decodes a push with a default `JSONDecoder`.
+- **What it shows** (`CookActivityPresenter`, MeatGeekKit): the cook's name;
+  the elapsed time, ticking from the cook's start; the grill as reading
+  against target (`224° / 225°`, `224°` with no target, `—` with no reading);
+  and each probe that has a reading next to its target (`187° → 203°`). A
+  probe with no reading is left out. Whole degrees in the device's unit,
+  converted from °F as the live panel converts. The views
+  (`CookActivityLockScreenView`, MeatGeekActivity) take only the resulting
+  `CookActivityPresentation`.
+- **When** (`CookActivityTracker`, MeatGeekKit, owned by `CooksModel`): every
+  cook `CooksModel.apply(_:)` sees, which is every cook started, stopped or
+  changed in the app. A running cook gets an activity (one the system already
+  shows for it, from an earlier launch, is taken over); a changed target
+  updates it; a stopped cook ends it, at once. While it tracks an activity and
+  the app is active, the tracker holds its own `LiveConnection`, separate from
+  the cook screen's, and each `temperature` message from a tracked cook's
+  device updates that activity; `cook_stopped` ends it.
+- **The port** (`LiveActivities`, MeatGeekKit): `running`, `start`, `update`,
+  `end`, and the token streams (`pushToStartTokens`, `pushTokens`). The app's
+  is `ActivityKitLiveActivities` (MeatGeekActivity), local activities with no
+  push type; UI test mode's is `StubLiveActivities`, in memory, with no
+  connection of its own (a second stub connection would change the readings
+  the live panel's UI tests expect); unit tests use `FakeLiveActivities`.
+- **Live Activities off in Settings**: `start` throws, the tracker drops it,
+  and the app says nothing.
+- **A tap** opens `meatgeek://cook/<id>` (`CookLink`; the `meatgeek` URL
+  scheme is in `Config/MeatGeek-Info.plist`). `MeatGeekApp` holds the id until
+  the signed-in screens show it, then the Cooks tab opens that cook's screen.
+- **The extension**: `MeatGeekWidgets` (`com.meatgeek.ios.widgets`) holds only
+  `@main` `MeatGeekWidgetsBundle` over `CookActivityWidget`. Its Info.plist
+  keys are in `Config/MeatGeekWidgets-Info.plist`. The app's Info.plist sets
+  `NSSupportsLiveActivities` and `NSSupportsLiveActivitiesFrequentUpdates`.
+  The Dynamic Island is a placeholder (cook name and grill) until #272.
+
+`CookActivityTests.swift` (MeatGeekKitTests) tests the text, the unit, the
+link and the tracker over the fake port, fake hubs and a virtual clock.
+`CookActivityViewTests.swift` (MeatGeekActivityTests) renders the lock-screen
+view from a presentation value with `ImageRenderer`, on CI's unsigned
+simulator build.
 
 ## Cook chart
 

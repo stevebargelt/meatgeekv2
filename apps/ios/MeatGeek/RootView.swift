@@ -9,6 +9,11 @@ struct RootView: View {
     var now: @Sendable () -> Date = { Date() }
     /// What an active cook's live panel connects with.
     var live: LiveServices?
+    /// The lock-screen activities, and what they follow readings with.
+    var activities: (any LiveActivities)?
+    var activityLive: LiveServices?
+    /// A cook to open, from a tapped lock-screen activity.
+    var openCook: Binding<String?> = .constant(nil)
 
     var body: some View {
         switch session.state {
@@ -22,7 +27,7 @@ struct RootView: View {
             ProgressView("Signing in…")
                 .accessibilityIdentifier(AccessibilityID.signingIn)
         case .signedIn:
-            SignedInView(session: session, now: now, live: live)
+            SignedInView(session: session, now: now, live: live, activities: activities, activityLive: activityLive, openCook: openCook)
         }
     }
 }

@@ -28,8 +28,9 @@ struct CooksView: View {
     let model: CooksModel
     let profile: ProfileModel
     let session: SessionModel
-
-    @State private var path: [Route] = []
+    /// The tab's navigation stack. Held by `SignedInView`, so tapping a
+    /// cook's lock-screen activity can open its screen here.
+    @Binding var path: [Route]
 
     var body: some View {
         NavigationStack(path: $path) {

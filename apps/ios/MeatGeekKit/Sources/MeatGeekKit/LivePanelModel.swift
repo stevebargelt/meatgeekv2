@@ -277,7 +277,7 @@ public final class LivePanelModel {
         let deviceID = self.deviceID
         let cookID = self.cookID
         let connection = LiveConnection(
-            negotiate: { [weak self] in await self?.negotiate() ?? .failed(status: nil) },
+            negotiate: { [session] in await session.negotiateLive() },
             createHub: services.createHub,
             sleep: services.sleep,
             handlers: .init(
@@ -307,30 +307,6 @@ public final class LivePanelModel {
     private func show(_ next: LiveReading) {
         if let previous = reading, let at = next.date, let before = previous.date, at < before { return }
         reading = next
-    }
-
-    /// `POST /negotiate` through the generated client and the session, so a
-    /// 401 here ends the session as it does for every other call.
-    private func negotiate() async -> NegotiateResult {
-        do {
-            let output = try await session.perform { api in try await api.negotiate() }
-            switch output {
-            case .ok(let ok):
-                guard let info = try? ok.body.json else { return .failed(status: nil) }
-                return .ok(info)
-            case .unauthorized:
-                session.endSession()
-                return .failed(status: 401)
-            case .serviceUnavailable:
-                return .failed(status: 503)
-            case .undocumented(let status, _):
-                return .failed(status: status)
-            }
-        } catch SessionError.sessionEnded, SessionError.notSignedIn {
-            return .failed(status: 401)
-        } catch {
-            return .failed(status: nil)
-        }
     }
 
     /// `GET /temperatures/current/{deviceId}`. A 404 is "no reading yet"; any

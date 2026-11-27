@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "MeatGeekKit", targets: ["MeatGeekKit"]),
         .library(name: "MeatGeekMSAL", targets: ["MeatGeekMSAL"]),
         .library(name: "MeatGeekLive", targets: ["MeatGeekLive"]),
+        .library(name: "MeatGeekActivity", targets: ["MeatGeekActivity"]),
     ],
     dependencies: [
         // Exact pins: the generated code is only as stable as the generator.
@@ -72,6 +73,17 @@ let package = Package(
                 .product(name: "SignalRClient", package: "SignalR-Client-Swift"),
             ]
         ),
+        // The lock-screen activity (#271): the ActivityKit adapter behind the
+        // LiveActivities port, the views and the widget. Kept apart from
+        // MeatGeekKit so its models and tests link neither ActivityKit nor
+        // WidgetKit; the app and the MeatGeekWidgets extension link it.
+        .target(
+            name: "MeatGeekActivity",
+            dependencies: [
+                "MeatGeekKit",
+                "MeatGeekAPI",
+            ]
+        ),
         .testTarget(
             name: "MeatGeekKitTests",
             dependencies: [
@@ -88,6 +100,14 @@ let package = Package(
                 "MeatGeekLive",
                 "MeatGeekAPI",
                 .product(name: "SignalRClient", package: "SignalR-Client-Swift"),
+            ]
+        ),
+        // Renders the lock-screen view from its presentation value.
+        .testTarget(
+            name: "MeatGeekActivityTests",
+            dependencies: [
+                "MeatGeekActivity",
+                "MeatGeekKit",
             ]
         ),
     ],

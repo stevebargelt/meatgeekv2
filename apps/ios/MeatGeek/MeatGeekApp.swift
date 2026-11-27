@@ -1,3 +1,4 @@
+import MeatGeekActivity
 import MeatGeekKit
 import MeatGeekLive
 import MeatGeekMSAL
@@ -9,29 +10,46 @@ struct MeatGeekApp: App {
         appVersion: AppVersion(infoDictionary: Bundle.main.infoDictionary)
     )
     @State private var app = AppComposition.make()
+    /// The cook a tapped lock-screen activity opens (`meatgeek://cook/<id>`),
+    /// until the signed-in screens show it.
+    @State private var openCook: String?
 
     var body: some Scene {
         WindowGroup {
-            RootView(root: root, session: app.session, now: app.now, live: app.live)
-                // MSAL's own URLs, if any. Sign-in uses the system browser
-                // (ASWebAuthenticationSession), which hands MSAL its redirect
-                // itself, and never the Authenticator broker (HAR-171), so
-                // this is not expected to be called.
-                .onOpenURL { url in MSALTokenProvider.handle(url: url) }
+            RootView(
+                root: root, session: app.session, now: app.now, live: app.live,
+                activities: app.activities, activityLive: app.activityLive, openCook: $openCook
+            )
+                // A tapped lock-screen activity's link opens its cook.
+                // Otherwise MSAL's own URLs, if any. Sign-in uses the system
+                // browser (ASWebAuthenticationSession), which hands MSAL its
+                // redirect itself, and never the Authenticator broker
+                // (HAR-171), so that is not expected to be called.
+                .onOpenURL { url in
+                    if let cookID = CookLink.cookID(from: url) {
+                        openCook = cookID
+                    } else {
+                        _ = MSALTokenProvider.handle(url: url)
+                    }
+                }
                 .task { await app.session.restore() }
         }
     }
 }
 
-/// The session, the clock and the live services the app runs on.
+/// The session, the clock, the live services and the lock-screen activities
+/// the app runs on.
 struct AppServices {
     let session: SessionModel
     let now: @Sendable () -> Date
     let live: LiveServices
+    let activities: any LiveActivities
+    /// What the activities follow readings with; nil in UI test mode.
+    let activityLive: LiveServices?
 }
 
 /// Builds the app's session from its Info.plist config, with the real clock
-/// and the SignalR hub, or everything from the fakes in UI test mode
+/// the SignalR hub and ActivityKit, or everything from the fakes in UI test mode
 /// (`MEATGEEK_UI_TEST=1`, see `UITestMode`).
 enum AppComposition {
     @MainActor
@@ -41,12 +59,17 @@ enum AppComposition {
     ) -> AppServices {
         if UITestMode.isEnabled(environment) {
             let app = UITestMode.makeApp(environment: environment)
-            return AppServices(session: app.session, now: app.now, live: app.live)
+            return AppServices(
+                session: app.session, now: app.now, live: app.live, activities: app.activities, activityLive: nil
+            )
         }
+        let live = LiveServices(createHub: SignalRLiveHub.factory)
         return AppServices(
             session: makeSession(bundle: bundle),
             now: { Date() },
-            live: LiveServices(createHub: SignalRLiveHub.factory)
+            live: live,
+            activities: ActivityKitLiveActivities(),
+            activityLive: live
         )
     }
 

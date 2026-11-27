@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The MeatGeekWidgets extension's Info.plist keys that build settings cannot
+  generate (GENERATE_INFOPLIST_FILE merges this file with the generated keys):
+  NSExtension marks it a WidgetKit extension. It holds the lock-screen
+  activity (#271).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
+</dict>
+</plist>

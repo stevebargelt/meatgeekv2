@@ -182,3 +182,29 @@ public final class LiveConnection {
         }
     }
 }
+
+extension SessionModel {
+    /// `POST /negotiate` through the generated client and the session, so a
+    /// 401 here ends the session as it does for every other call.
+    func negotiateLive() async -> NegotiateResult {
+        do {
+            let output = try await perform { api in try await api.negotiate() }
+            switch output {
+            case .ok(let ok):
+                guard let info = try? ok.body.json else { return .failed(status: nil) }
+                return .ok(info)
+            case .unauthorized:
+                endSession()
+                return .failed(status: 401)
+            case .serviceUnavailable:
+                return .failed(status: 503)
+            case .undocumented(let status, _):
+                return .failed(status: status)
+            }
+        } catch SessionError.sessionEnded, SessionError.notSignedIn {
+            return .failed(status: 401)
+        } catch {
+            return .failed(status: nil)
+        }
+    }
+}

@@ -40,6 +40,7 @@ spec/
       user.yaml                 # User, preferences, PutUserProfileRequest
       recipe.yaml               # Recipe, requests, list wrapper
       signalr-payloads.yaml     # negotiate response and the x-signalr messages
+      live-activity.yaml        # the iOS lock-screen activity's attributes and content state
 ```
 
 `openapi.yaml` is the single entry point; every tool (swagger-parser,

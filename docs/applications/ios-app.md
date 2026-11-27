@@ -36,6 +36,9 @@ Screen state is `@Observable`, `@MainActor` models.
 | `MeatGeekLive`        | Swift package library                     | `SignalRLiveHub`: the only code that links `SignalR-Client-Swift` (1.2.1). The app links it; `MeatGeekKitTests` does not                              |
 | `MeatGeekKitTests`    | Swift package tests (Swift Testing)       | Unit tests of every model, with fakes and a virtual clock                                                                                             |
 | `MeatGeekLiveTests`   | Swift package tests (Swift Testing)       | Decodes a real `temperature` frame through the SignalR client's JSON hub protocol                                                                     |
+| `MeatGeekActivity`    | Swift package library                     | The lock-screen activity (#271): the ActivityKit adapter behind `LiveActivities`, the lock-screen view and the widget. The app and `MeatGeekWidgets` link it |
+| `MeatGeekActivityTests` | Swift package tests (Swift Testing)     | Renders the lock-screen view from its presentation value                                                                                              |
+| `MeatGeekWidgets`     | Widget extension (`com.meatgeek.ios.widgets`) | Embedded in the app; holds the cook's lock-screen activity                                                                                       |
 | `MeatGeekMSALTests`   | XCTest, hosted in the app                 | `MSALTokenProvider` against the real MSAL: creating it turns the Authenticator broker off (HAR-171)                                                   |
 | `MeatGeekUITests`     | XCUITest (`com.meatgeek.ios.uitests`)     | The main paths, driven against the in-process stub API                                                                                                |
 | `MeatGeekLiveUITests` | XCUITest (`com.meatgeek.ios.liveuitests`) | The live iOS proof against dev, in its own test plan `Live.xctestplan`; CI only compiles it                                                           |
@@ -158,8 +161,8 @@ xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
   -skipPackagePluginValidation
 ```
 
-This runs the `MeatGeek` test plan: `MeatGeekKitTests` and `MeatGeekLiveTests`
-(Swift Testing), `MeatGeekMSALTests` (XCTest, in the app, against the real
+This runs the `MeatGeek` test plan: `MeatGeekKitTests`, `MeatGeekLiveTests`
+and `MeatGeekActivityTests` (Swift Testing), `MeatGeekMSALTests` (XCTest, in the app, against the real
 MSAL) and `MeatGeekUITests` (XCUITest). It needs Xcode's default simulator
 signing, so do not add `CODE_SIGNING_ALLOWED=NO`: MSAL's keychain cache needs
 the build's entitlements. The UI tests launch the app
