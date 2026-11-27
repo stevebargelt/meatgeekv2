@@ -40,7 +40,7 @@ jobs:
           xcodebuild -version
 
       - name: Resolve Swift packages
-        run: xcodebuild -resolvePackageDependencies -project apps/ios/MeatGeek.xcodeproj -derivedDataPath "$RUNNER_TEMP/DerivedData" -skipPackagePluginValidation
+        run: xcodebuild -resolvePackageDependencies -project apps/ios/MeatGeek.xcodeproj -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" -disablePackageRepositoryCache -skipPackagePluginValidation
 
       - uses: actions/setup-node@v5
         with:
@@ -66,4 +66,4 @@ jobs:
           plugins: mattpocock-skills@claude-plugins-official
           claude_args: |
             --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
-            --append-system-prompt "Swift packages are already resolved. Pass -derivedDataPath \"$RUNNER_TEMP/DerivedData\" -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
+            --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"$RUNNER_TEMP/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
