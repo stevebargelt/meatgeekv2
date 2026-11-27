@@ -232,6 +232,42 @@ describe('POST /users/me/push-tokens', () => {
     expect(((await w.list(OTHER_OID)).jsonBody as { items: unknown[] }).items).toHaveLength(1);
   });
 
+  it('a takeover that failed to reach the other user finishes when the phone registers again', async () => {
+    const w = new World();
+    await w.register(TOKEN, OTHER_OID);
+    let failed = false;
+    w.container.beforeReplace = id => {
+      if (!failed && id === `push-tokens:${TID}:${OTHER_OID}`) {
+        failed = true;
+        w.container.failNext('replace', 503);
+      }
+    };
+
+    expect((await w.register(TOKEN)).status).toBe(500);
+    const retried = await w.register(TOKEN);
+
+    expect(retried.status).toBe(200);
+    expect(((await w.list(OTHER_OID)).jsonBody as { items: unknown[] }).items).toHaveLength(0);
+    expect(w.container.stored(`push-token-owner:${pushTokenId(TOKEN)}`)).toMatchObject({
+      userId: USER_ID,
+    });
+  });
+
+  it('forgets who held a token the caller drops for an eleventh phone', async () => {
+    const w = new World();
+    const tokens = Array.from({ length: MAX_PUSH_TOKENS_PER_USER + 1 }, (_, i) =>
+      i.toString(16).padStart(2, '0').repeat(32)
+    );
+    for (const [i, token] of tokens.entries()) {
+      w.now = new Date(Date.UTC(2026, 10, 27, 10, i));
+      await w.register(token);
+    }
+    expect(w.container.stored(`push-token-owner:${pushTokenId(tokens[0])}`)).toBeUndefined();
+    expect(w.container.stored(`push-token-owner:${pushTokenId(tokens[1])}`)).toMatchObject({
+      userId: USER_ID,
+    });
+  });
+
   it('records who holds a token by its id, never the token', async () => {
     const w = new World();
     await w.register(TOKEN);

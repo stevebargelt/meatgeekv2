@@ -18,10 +18,12 @@ import { getCosmosAdapter } from './cosmos-adapter';
  *
  * ONE HOLDER PER PHONE. A token belongs to the account that registered it
  * last: a second document, id `push-token-owner:<tokenId>`, names the user
- * that holds it. Registering a token another user holds moves it: the owner
- * document changes first, then the token leaves the other user's document, so
- * a phone signed in to a new account stops getting the old account's alerts.
- * Removing a token forgets its owner when the remover is the owner. A token
+ * that holds it. Registering a token another user holds moves it: the token
+ * leaves the other user's document first, then the owner document changes, so
+ * a phone signed in to a new account stops getting the old account's alerts,
+ * and a move that failed halfway finishes at the phone's next registration.
+ * Removing a token, or dropping it for an eleventh phone, forgets its owner
+ * when that is the user. A token
  * registered before this document existed gets one at its next registration
  * (the app registers on every launch).
  *
@@ -228,13 +230,12 @@ export class PushTokensRepository {
   }
 
   /**
-   * Makes `userId` the holder of `tokenId`. Returns the user that held it
-   * before, when that was someone else.
+   * Makes `userId` the holder of `tokenId`. The token leaves the previous
+   * holder's document before the owner document names `userId`, so a failure
+   * in between leaves the previous holder named, and the next registration
+   * finishes the move.
    */
-  private async claimOwner(
-    tokenId: string,
-    userId: string
-  ): Promise<{ previous?: string; requestCharge: number }> {
+  private async claimOwner(tokenId: string, userId: string): Promise<{ requestCharge: number }> {
     const id = pushTokenOwnerDocumentId(tokenId);
     const document: PushTokenOwnerDocument = { id, tokenId, userId };
     let requestCharge = 0;
@@ -243,6 +244,10 @@ export class PushTokensRepository {
       requestCharge += current.requestCharge;
       if (current.userId === userId) {
         return { requestCharge };
+      }
+      if (current.userId !== undefined && current.userId !== '') {
+        const taken = await this.removeFromUser(current.userId, tokenId);
+        requestCharge += taken.requestCharge;
       }
       try {
         const response =
@@ -257,11 +262,7 @@ export class PushTokensRepository {
                 )
             : await this.container.items.create<PushTokenOwnerDocument>(document);
         requestCharge += response.requestCharge;
-        return {
-          previous:
-            current.userId === undefined || current.userId === '' ? undefined : current.userId,
-          requestCharge,
-        };
+        return { requestCharge };
       } catch (error) {
         const status = statusCodeOf(error);
         requestCharge += chargeOf(error);
@@ -329,20 +330,20 @@ export class PushTokensRepository {
     const id = pushTokenId(normalized);
     const registeredAt = this.now().toISOString();
     let created = true;
+    let dropped: string[] = [];
     const result = await this.update(userId, tokens => {
       created = !tokens.some(t => t.id === id);
-      const others = tokens.filter(t => t.id !== id);
-      const kept = [...others]
-        .sort((a, b) => Date.parse(b.registeredAt) - Date.parse(a.registeredAt))
-        .slice(0, MAX_PUSH_TOKENS_PER_USER - 1);
+      const others = [...tokens.filter(t => t.id !== id)].sort(
+        (a, b) => Date.parse(b.registeredAt) - Date.parse(a.registeredAt)
+      );
+      const kept = others.slice(0, MAX_PUSH_TOKENS_PER_USER - 1);
+      dropped = others.slice(MAX_PUSH_TOKENS_PER_USER - 1).map(t => t.id);
       return [...kept, { id, token: normalized, registeredAt }];
     });
     let requestCharge = result.requestCharge;
-    const owner = await this.claimOwner(id, userId);
-    requestCharge += owner.requestCharge;
-    if (owner.previous !== undefined) {
-      const taken = await this.removeFromUser(owner.previous, id);
-      requestCharge += taken.requestCharge;
+    requestCharge += (await this.claimOwner(id, userId)).requestCharge;
+    for (const droppedId of dropped) {
+      requestCharge += await this.releaseOwner(droppedId, userId);
     }
     return { token: { id, registeredAt }, created, requestCharge };
   }
