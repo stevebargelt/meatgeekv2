@@ -414,7 +414,8 @@ struct CookChartModelTests {
 
         #expect(model.loadsAnswered == 1)
         gate.open()
-        await until("the overtaken load answered") { model.loadsAnswered == 2 }
+        await until("the overtaken load answered") { model.loadsAnswered >= 2 }
+        #expect(model.loadsAnswered == 2)
         #expect(model.state == .loaded(F.twoHours))
     }
 }
@@ -463,7 +464,8 @@ struct CookDetailChartTests {
         #expect(try #require(chart.series).rows.count == 2)
 
         let live = try #require(detail.live)
-        await until("connected and backfilled") { live.status == .connected && live.backfillsAnswered == 1 }
+        await until("connected and backfilled") { live.status == .connected && live.backfillsAnswered >= 1 }
+        #expect(live.backfillsAnswered == 1)
         // The backfill is not a push: the chart does not draw it.
         #expect(chart.pushed.isEmpty)
 
@@ -580,11 +582,13 @@ struct StubChartTests {
         #expect(chart.state == .loaded(CookChart(
             cookId: cook.id, deviceId: cook.deviceId, startTime: cook.startTime, bucketSeconds: ._60, points: []
         )))
-        await until("the first push on the chart") { chart.series?.rows.count == 1 }
+        await until("the first push on the chart") { (chart.series?.rows.count ?? 0) >= 1 }
+        #expect(chart.series?.rows.count == 1)
         #expect(chart.series?.summary(unit: .fahrenheit) == "Grill, Probe 1; 1 point; latest Grill 225 °F, Probe 1 150 °F")
         live.dropConnection()
         live.reconnectNow()
-        await until("the second push on the chart") { chart.series?.rows.count == 2 }
+        await until("the second push on the chart") { (chart.series?.rows.count ?? 0) >= 2 }
+        #expect(chart.series?.rows.count == 2)
 
         await detail.stop()
         await chart.waitForLoad()

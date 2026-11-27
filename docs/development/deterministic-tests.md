@@ -15,7 +15,11 @@ A non-live test may wait only by:
 2. **a fake clock the test advances**;
 3. **polling a condition with no deadline of its own**, bounded only by the
    runner's hang guard (`go test -timeout`, Jest's `testTimeout`, test-repeat's
-   `timeoutSec`).
+   `timeoutSec`). One exception: MeatGeekKit's `until` carries a fixed 30 s
+   hang guard of its own, because the runner's (the test plan's 300 s
+   allowance) does not say which wait stuck. It is one constant, never set
+   per wait, and roughly 100 times longer than any of those waits takes; see
+   [Swift (iOS)](#swift-ios).
 
 It may not:
 
@@ -149,6 +153,26 @@ that would otherwise never finish, so it cannot turn a slow pass into a failure.
   unset unsets it (`run-destroy-guard-fixtures.sh` unsets
   `TF_DESTROY_GUARD_AUTHORIZED_CHANGES` per case); test-repeat runs each suite
   with only an allowlisted environment.
+
+### Swift (iOS)
+
+- **A fake clock the test moves.** `VirtualClock` in MeatGeekKit's
+  `LiveTests.swift` stands in for retry sleeps: `advance(by:)` wakes each sleep
+  whose deadline has passed.
+- **`until(what) { condition }`** (`LiveTests.swift`, shared by every
+  MeatGeekKit test) yields until the condition holds. After
+  `untilHangGuard` (30 s) it records an issue naming `what` and returns. The
+  waits it guards come true in well under a second, so the limit is a hang
+  guard, not a timing bet: it stops a stuck wait from running into the test
+  plan's 300 s allowance with no clue which wait stuck. It is the one
+  per-wait deadline [the rule](#the-rule) allows; never add a per-call limit.
+  Wait for at least a count (`calls >= 2`), then `#expect` the exact count.
+  A count that overshoots then fails at once and names itself, where `== 2`
+  would spin until the guard (#270).
+- **State a fake shares across tasks is locked for the whole update.** `Box`
+  (`CooksTests.swift`) holds its lock through `box.value += 1`. With a lock
+  only around get and set, two handlers running at once could lose an
+  increment (#270).
 
 ## The live suites are the exception
 

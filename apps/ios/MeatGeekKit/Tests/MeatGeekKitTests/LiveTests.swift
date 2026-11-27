@@ -9,15 +9,32 @@ import Testing
 /// are fakes, retry waits run on `VirtualClock`, and readings are aged on an
 /// injected clock: nothing here waits in real time. A test waits for the
 /// connection's background steps with `until`, which re-checks its condition
-/// with no deadline of its own (the hang guard is the test plan's).
+/// until it holds, and fails naming the wait if it never does.
 
 // MARK: - Fakes
 
-/// Waits, with no deadline, until `condition` holds, letting the code under
-/// test run between checks.
+/// How long `until` waits before it calls a wait stuck. One constant, never
+/// set per wait, so it cannot be tuned into a timing bet.
+let untilHangGuard: Duration = .seconds(30)
+
+/// Waits until `condition` holds, letting the code under test run between
+/// checks. It is a hang guard, not a timing bet: every wait here comes true
+/// in well under a second, so one that has not after `untilHangGuard` never
+/// will. It records an issue naming `what` and returns, instead of spinning
+/// until the test plan's 300 s allowance with no word on which wait stuck.
 @MainActor
-func until(_ what: String, _ condition: () -> Bool) async {
+func until(
+    _ what: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: () -> Bool
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: untilHangGuard)
     while !condition() {
+        if clock.now >= deadline {
+            Issue.record("Waited \(untilHangGuard) for \"\(what)\"; it never came true", sourceLocation: sourceLocation)
+            return
+        }
         await Task.yield()
     }
 }
@@ -238,7 +255,8 @@ final class ConnectionHarness {
     func retry(after delay: Duration, thenCalls calls: Int) async {
         await until("the retry wait") { clock.pending == [delay] }
         clock.advance(by: delay)
-        await until("negotiate call \(calls)") { negotiate.calls == calls }
+        await until("negotiate call \(calls)") { negotiate.calls >= calls }
+        #expect(negotiate.calls == calls)
     }
 }
 
@@ -295,7 +313,8 @@ struct LiveConnectionTests {
         #expect(c.clock.pending == [.milliseconds(1)])
         #expect(c.negotiate.calls == 1)
         c.clock.advance(by: .milliseconds(1))
-        await until("the second connection") { c.connected == 2 }
+        await until("the second connection") { c.connected >= 2 }
+        #expect(c.connected == 2)
 
         #expect(c.negotiate.calls == 2)
         #expect(c.hubs.hubs.count == 2)
@@ -325,8 +344,9 @@ struct LiveConnectionTests {
             #expect(c.negotiate.calls == callsAfter - 1)
             c.clock.advance(by: .milliseconds(1))
             await until("negotiate call \(callsAfter) answered") {
-                c.negotiate.calls == callsAfter && (c.clock.pending.count == 1 || c.status == .connected)
+                c.negotiate.calls >= callsAfter && (c.clock.pending.count == 1 || c.status == .connected)
             }
+            #expect(c.negotiate.calls == callsAfter)
         }
         await until("connected") { c.status == .connected }
         #expect(c.hubs.hubs.count == 1)
@@ -346,7 +366,8 @@ struct LiveConnectionTests {
 
         try #require(c.hubs.latest).close()
         await c.retry(after: .seconds(2), thenCalls: 4)
-        await until("connected again") { c.connected == 2 }
+        await until("connected again") { c.connected >= 2 }
+        #expect(c.connected == 2)
         c.connection.stop()
     }
 
@@ -423,7 +444,8 @@ struct LiveConnectionTests {
         c.connection.stop()
         c.negotiate.release()
         // The connection reads the answer in the same main-actor job.
-        await until("negotiate answered") { c.negotiate.answered == 1 }
+        await until("negotiate answered") { c.negotiate.answered >= 1 }
+        #expect(c.negotiate.answered == 1)
         #expect(c.negotiate.calls == 1)
         #expect(c.hubs.hubs.isEmpty)
         #expect(c.statuses == [.connecting])
@@ -436,7 +458,8 @@ struct LiveConnectionTests {
         let first = try #require(c.hubs.latest)
         first.close()
         await c.retry(after: .seconds(2), thenCalls: 2)
-        await until("the second connection") { c.connected == 2 }
+        await until("the second connection") { c.connected >= 2 }
+        #expect(c.connected == 2)
 
         first.emit(LiveFixtures.temperature())
         first.reconnecting()
@@ -554,7 +577,8 @@ final class PanelHarness {
             onCookStopped: { [unowned self] in self.stoppedCooks.append($0) }
         )
         model.appear()
-        await until("connected and backfilled") { model.status == .connected && model.backfillsAnswered == 1 }
+        await until("connected and backfilled") { model.status == .connected && model.backfillsAnswered >= 1 }
+        #expect(model.backfillsAnswered == 1)
     }
 
     var hub: FakeHub { hubs.latest! }
@@ -774,7 +798,8 @@ struct LivePanelModelTests {
         p.hub.emit(LiveFixtures.temperature(at: 5, grill: 215))
         p.current.value = TemperatureReading(deviceId: "box", timestamp: LiveFixtures.iso(), grillTemp: 1)
         p.hub.reconnected()
-        await until("the second backfill applied") { p.model.backfillsAnswered == 2 }
+        await until("the second backfill applied") { p.model.backfillsAnswered >= 2 }
+        #expect(p.model.backfillsAnswered == 2)
         #expect(p.channel(.grill) == "215 °F")
         p.model.disappear()
     }
@@ -788,7 +813,9 @@ struct LivePanelModelTests {
         await until("the retry wait") { p.clock.pending == [.seconds(2)] }
 
         p.clock.advance(by: .seconds(2))
-        await until("the second connection, backfilled") { p.hubs.hubs.count == 2 && p.model.backfillsAnswered == 2 }
+        await until("the second connection, backfilled") { p.hubs.hubs.count >= 2 && p.model.backfillsAnswered >= 2 }
+        #expect(p.hubs.hubs.count == 2)
+        #expect(p.model.backfillsAnswered == 2)
         #expect(p.negotiations.value == 2)
         #expect(p.hub.info.accessToken == "tok-2")
         await until("connected") { p.model.status == .connected }
@@ -866,7 +893,8 @@ struct LivePanelModelTests {
         p.current.value = TemperatureReading(deviceId: "box", timestamp: LiveFixtures.iso(2), grillTemp: 230)
         p.model.setAppActive(true)
         #expect(p.model.status == .connecting)
-        await until("the new connection, backfilled") { p.model.status == .connected && p.model.backfillsAnswered == 2 }
+        await until("the new connection, backfilled") { p.model.status == .connected && p.model.backfillsAnswered >= 2 }
+        #expect(p.model.backfillsAnswered == 2)
         #expect(p.channel(.grill) == "230 °F")
         #expect(p.negotiations.value == 2)
         #expect(p.hubs.hubs.count == 2)
@@ -979,7 +1007,8 @@ struct CookDetailLiveTests {
         let hub = try #require(hubs.latest)
         hub.emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 210))
         #expect(marks() == [nil, nil, nil, nil, nil])
-        await until("the cook re-read") { reads.value == 2 && detail.cook == reached }
+        await until("the reached mark") { detail.cook == reached }
+        #expect(reads.value == 2)
         #expect(marks() == [nil, "✓ Reached 6:00\u{202F}PM", nil, nil, nil])
         #expect(live.display().channels.map(\.target).prefix(2) == ["Target 225 °F", "Target 203 °F"])
 
@@ -988,7 +1017,8 @@ struct CookDetailLiveTests {
         rearmed.targetsReached = .init(grill: .init(reachedAt: fixedNow))
         served.value = rearmed
         hub.emit(LiveFixtures.temperature(at: 10, grill: 230, probe1: 180))
-        await until("the cook re-read again") { reads.value == 3 && detail.cook == rearmed }
+        await until("the mark cleared") { detail.cook == rearmed }
+        #expect(reads.value == 3)
         #expect(marks() == [nil, nil, nil, nil, nil])
         #expect(detail.isActive)
         detail.disappear()
@@ -1026,8 +1056,10 @@ struct CookDetailLiveTests {
         try #require(hubsA.latest).emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 170))
         try #require(hubsB.latest).emit(LiveFixtures.temperature(at: 5, grill: 230, probe1: 170))
         func probe1(_ live: LivePanelModel) -> LivePanelDisplay.Channel { live.display().channels[1] }
+        // Each reading re-reads its phone's cook; the edit starts once both have answered.
+        await until("both re-read") { !phoneA.isReReading && !phoneB.isReReading }
         // Two reads to open the screens, one re-read per reading.
-        await until("both re-read") { reads.value == 4 && !phoneA.isReReading && !phoneB.isReReading }
+        #expect(reads.value == 4)
         #expect(probe1(liveA).target == "Target 165 °F")
         #expect(probe1(liveB).reached != nil)
 
