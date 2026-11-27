@@ -43,6 +43,7 @@ apps/ios/
 ├── MeatGeekMSALTests/        # MSALTokenProvider against the real MSAL (XCTest, hosted in the app)
 ├── MeatGeekLiveUITests/      # The live iOS proof (XCUITest), see Run the tests
 ├── scripts/run-live-proof.sh # Runs the live proof (ios-live-proof.yml, daily)
+├── scripts/live-activity-push.mjs # Sends a lock-screen activity push by hand (#248)
 └── MeatGeekKit/              # Local Swift package: all the app's logic
     ├── Sources/MeatGeekAPI/      # Generated API client: openapi.yaml + generator config
     ├── Sources/MeatGeekKit/      # Config, session, screen models, token provider protocol, stub API
@@ -672,6 +673,24 @@ link and the tracker over the fake port, fake hubs and a virtual clock.
 `CookActivityViewTests.swift` (MeatGeekActivityTests) renders the lock-screen
 and every Dynamic Island view, current, stale and ended, from presentation
 values with `ImageRenderer`, on CI's unsigned simulator build.
+
+### Test pushes by hand
+
+For the trials of #249 (starting an activity by push, and ending it and
+starting a fresh one past the 8-hour limit), debug builds have a **Push** tab
+(`PushTokensView`, over `ActivityPushTokensModel` in MeatGeekKit): the token
+that starts an activity by push, and each running activity's cook and update
+token, with copy buttons. `#if DEBUG` keeps it out of a Release build.
+[`scripts/live-activity-push.mjs`](scripts/live-activity-push.mjs) sends one
+start, update or end push from the owner's Mac with his own `.p8` key, to the
+APNs sandbox; a start push carries a banner with no sound. The steps, what to
+record and what each result means:
+[the trials](../../docs/applications/ios-live-activity-trials.md).
+
+`ActivityPushTokensTests.swift` (MeatGeekKitTests) tests the tab's model over
+the fake port. `node --test apps/ios/scripts/test/live-activity-push.test.mjs`
+tests the script (payloads, headers, the provider token, what it prints and
+never prints) with a generated key and a recording sender. CI does not run it yet.
 
 ## Alerts
 
