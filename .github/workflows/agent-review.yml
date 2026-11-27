@@ -116,6 +116,8 @@ jobs:
             You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }},
             written by another agent for issue #${{ steps.hold.outputs.issue }}. You did not write it: review it
             as a stranger would. Read AGENTS.md first. No one is watching.
+            Run every sub-agent, task and command in the foreground and wait for it: this session ends the
+            moment you stop, and anything still running in the background is killed with it.
 
             1. Review it with the code-review skill: the diff against `origin/${{ github.event.pull_request.base.ref }}`,
                with the issue as the spec (`gh issue view ${{ steps.hold.outputs.issue }}`). Check claims in the
