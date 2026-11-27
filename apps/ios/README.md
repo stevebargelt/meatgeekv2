@@ -599,7 +599,12 @@ issues of #237.
   updates it; a stopped cook ends it, at once. While it tracks an activity and
   the app is active, the tracker holds its own `LiveConnection`, separate from
   the cook screen's, and each `temperature` message from a tracked cook's
-  device updates that activity; `cook_stopped` ends it.
+  device updates that activity; `cook_stopped` ends it. Each time the app
+  becomes active (launch included), the tracker reads the cook of every
+  activity the system shows: a running cook's activity is taken over and
+  followed, and a stopped or missing cook's is ended, so an activity from an
+  earlier launch keeps up and one for a cook stopped elsewhere while the app
+  was in the background goes. It never starts one there (#251 does).
 - **The port** (`LiveActivities`, MeatGeekKit): `running`, `start`, `update`,
   `end`, and the token streams (`pushToStartTokens`, `pushTokens`). The app's
   is `ActivityKitLiveActivities` (MeatGeekActivity), local activities with no

@@ -160,6 +160,12 @@ final class ActivityHarness {
     let hubs = FakeHubs()
     let clock = VirtualClock()
     let negotiations = Box(0)
+    /// What `GET /cooks/{id}` answers: the cook, a 404 when nil, or a 500
+    /// while `apiFails` is set.
+    let apiCook = Box<Cook?>(nil)
+    let apiFails = Box(false)
+    /// How many times `GET /cooks/{id}` was called.
+    let reads = Box(0)
     private(set) var session: SessionModel!
     private(set) var cooks: CooksModel!
 
@@ -169,6 +175,17 @@ final class ActivityHarness {
         api.negotiateHandler = { _ in
             negotiations.value += 1
             return .ok(.init(body: .json(LiveFixtures.info(negotiations.value))))
+        }
+        let apiCook = self.apiCook, apiFails = self.apiFails, reads = self.reads
+        api.getCookHandler = { _ in
+            reads.value += 1
+            if apiFails.value {
+                return .internalServerError(.init(body: .json(CookFixtures.error(.internalServerError, "Down"))))
+            }
+            guard let cook = apiCook.value else {
+                return .notFound(.init(body: .json(CookFixtures.error(.notFound, "Cook not found"))))
+            }
+            return .ok(.init(body: .json(cook)))
         }
         if let boxUnit {
             var box = DeviceFixtures.box
@@ -337,6 +354,7 @@ struct CookActivityTrackerTests {
     func appActive() async throws {
         let h = ActivityHarness()
         await h.open()
+        h.apiCook.value = Self.active()
         h.cooks.apply(Self.active())
         await h.connected()
         h.tracker.setAppActive(false)
@@ -345,6 +363,80 @@ struct CookActivityTrackerTests {
         h.tracker.setAppActive(true)
         await until("a second hub started") { h.hubs.hubs.count == 2 && h.hubs.latest?.starts == 1 }
         #expect(h.tracker.isConnected)
+    }
+
+    @Test("on becoming active, an activity from an earlier launch whose cook still runs is taken over and follows readings")
+    func reconcileAdopts() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        h.port.shown = [.init(id: "earlier", cookID: "cook-1")]
+        h.apiCook.value = Self.active()
+        h.tracker.setAppActive(true)
+        await until("taken over") { h.tracker.trackedCookIDs == ["cook-1"] }
+        #expect(h.port.calls == [.update(id: "earlier")])
+
+        await h.connected()
+        try #require(h.hubs.latest).emit(LiveFixtures.temperature(device: DeviceFixtures.box.id, at: 5, grill: 224, probe1: 187))
+        #expect(h.port.calls.last == .update(id: "earlier"))
+        #expect(h.port.states["earlier"]?.grillTemp == 224)
+
+        // Starting the same cook again in the app does not double it.
+        h.cooks.apply(Self.active())
+        #expect(!h.port.calls.contains(.start(cookID: "cook-1")))
+    }
+
+    @Test("on becoming active, an activity whose cook stopped elsewhere, or no longer exists, is ended")
+    func reconcileEnds() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        h.port.shown = [.init(id: "earlier", cookID: "cook-1")]
+        h.apiCook.value = Self.stopped(Self.active())
+        h.tracker.setAppActive(true)
+        await until("ended") { h.port.calls == [.end(id: "earlier")] }
+        #expect(h.tracker.trackedCookIDs.isEmpty)
+        #expect(!h.tracker.isConnected)
+
+        h.port.shown = [.init(id: "other-account", cookID: "cook-9")]
+        h.apiCook.value = nil
+        h.tracker.setAppActive(false)
+        h.tracker.setAppActive(true)
+        await until("ended") { h.port.calls.last == .end(id: "other-account") }
+    }
+
+    @Test("a cook stopped on the web while the app was in the background ends its activity on return")
+    func reconcileStoppedWhileAway() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        let cook = Self.active()
+        h.cooks.apply(cook)
+        await h.connected()
+        h.tracker.setAppActive(false)
+
+        h.apiCook.value = Self.stopped(cook)
+        h.tracker.setAppActive(true)
+        await until("ended") { h.port.calls.last == .end(id: "activity-1") }
+        #expect(h.tracker.trackedCookIDs.isEmpty)
+        #expect(h.cooks.devices.activeCook(for: DeviceFixtures.box) == nil)
+        await until("connection closed") { !h.tracker.isConnected }
+    }
+
+    @Test("a failed read leaves the activity as it is")
+    func reconcileFails() async throws {
+        let h = ActivityHarness()
+        await h.open()
+        let cook = Self.active()
+        h.cooks.apply(cook)
+        await h.connected()
+        h.apiFails.value = true
+        let before = h.reads.value
+        h.tracker.setAppActive(false)
+        h.tracker.setAppActive(true)
+        await until("the cook was read") { h.reads.value == before + 1 }
+        await until("a second hub started") { h.hubs.hubs.count == 2 && h.hubs.latest?.starts == 1 }
+        // Let the read's answer reach the tracker; the activity stays.
+        for _ in 0..<20 { await Task.yield() }
+        #expect(h.port.calls == [.start(cookID: "cook-1")])
+        #expect(h.tracker.trackedCookIDs == ["cook-1"])
     }
 
     @Test("with no live services (UI test mode) the activity starts and ends but opens no connection")

@@ -33,15 +33,26 @@ public final class ActivityKitLiveActivities: LiveActivities {
         return activity.id
     }
 
+    /// The last update or end handed to ActivityKit; the next waits for it.
+    private var last: Task<Void, Never>?
+
     // Each update and end looks the activity up in its own task: an
-    // `Activity` is not Sendable, so it is never handed across.
+    // `Activity` is not Sendable, so it is never handed across. The tasks run
+    // one at a time in the order they were asked for, so an older reading
+    // never lands after a newer one, nor an update after its end.
     public func update(_ id: String, _ state: CookActivityContentState) {
-        Task.detached { await Self.activity(id)?.update(.init(state: state, staleDate: nil)) }
+        enqueue { await Self.activity(id)?.update(.init(state: state, staleDate: nil)) }
     }
 
     public func end(_ id: String, _ state: CookActivityContentState) {
-        Task.detached {
-            await Self.activity(id)?.end(.init(state: state, staleDate: nil), dismissalPolicy: .immediate)
+        enqueue { await Self.activity(id)?.end(.init(state: state, staleDate: nil), dismissalPolicy: .immediate) }
+    }
+
+    private func enqueue(_ work: @escaping @Sendable () async -> Void) {
+        let previous = last
+        last = Task.detached {
+            await previous?.value
+            await work()
         }
     }
 

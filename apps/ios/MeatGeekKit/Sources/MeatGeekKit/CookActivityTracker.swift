@@ -8,6 +8,11 @@ import Foundation
 ///   over, otherwise a new one is started. A later call with the same cook
 ///   (its targets changed) updates it.
 /// - A cook that is no longer running ends its activity.
+/// - Each time the app becomes active, every activity the system shows is
+///   checked against its cook on the API: a running cook's is taken over and
+///   followed, a stopped or missing cook's is ended. So an activity from an
+///   earlier launch keeps up, and a cook stopped elsewhere while the app was
+///   in the background ends.
 /// - While any activity is tracked and the app is active, it holds its own
 ///   live connection (`LiveConnection`, as the cook screen's panel does), and
 ///   each `temperature` message from a tracked cook's device updates that
@@ -32,6 +37,11 @@ public final class CookActivityTracker {
     private var tracked: [String: Tracked] = [:]
     private var connection: LiveConnection?
     private var appActive = true
+    /// The check of the shown activities in progress, if any.
+    private var reconciling: Task<Void, Never>?
+    /// Activities the tracker has ended, so a check that read their cook
+    /// before they ended does not take them over again.
+    private var ended: Set<String> = []
 
     /// A `cook_stopped` for a tracked cook arrived on the tracker's connection.
     public var onCookStopped: @MainActor (Cook) -> Void = { _ in }
@@ -69,15 +79,98 @@ public final class CookActivityTracker {
         } else if let current = tracked.removeValue(forKey: cook.id) {
             var ended = current
             ended.cook = cook
-            activities.end(current.activityID, content(ended))
+            end(current.activityID, content(ended))
         }
         updateConnection()
     }
 
-    /// The scene phase: active, or not. Readings are followed only while active.
+    /// The scene phase: active, or not. Readings are followed only while
+    /// active. Each time the app becomes active, every activity the system
+    /// shows is checked against its cook (see `reconcile()`).
     public func setAppActive(_ active: Bool) {
         appActive = active
         updateConnection()
+        if active { reconcile() }
+    }
+
+    /// Checks every activity the system shows, including any from an earlier
+    /// launch, against its cook on the API: one whose cook still runs is
+    /// taken over and followed; one whose cook has stopped (while the app
+    /// was in the background, or before this launch) or no longer exists is
+    /// ended. A failed read leaves the activity as it is. Activities are
+    /// never started here.
+    private func reconcile() {
+        guard reconciling == nil else { return }
+        let shown = activities.running()
+        guard !shown.isEmpty else { return }
+        reconciling = Task { [weak self, session] in
+            for activity in shown {
+                let found = await Self.read(activity.cookID, session)
+                self?.reconciled(activity, found)
+            }
+            self?.reconciling = nil
+        }
+    }
+
+    private enum Found {
+        case cook(Cook)
+        case gone
+        case unknown
+    }
+
+    private static func read(_ cookID: String, _ session: SessionModel) async -> Found {
+        guard let output = try? await session.perform({ api in try await api.getCook(path: .init(cookId: cookID)) })
+        else { return .unknown }
+        switch output {
+        case .ok(let ok):
+            guard let cook = try? ok.body.json else { return .unknown }
+            return .cook(cook)
+        case .notFound:
+            return .gone
+        default:
+            return .unknown
+        }
+    }
+
+    private func reconciled(_ activity: RunningCookActivity, _ found: Found) {
+        // Ended in the meantime (by the app, while the read was out).
+        guard !ended.contains(activity.id) else { return }
+        switch found {
+        case .unknown:
+            return
+        case .gone:
+            if let current = tracked[activity.cookID], current.activityID == activity.id {
+                tracked[activity.cookID] = nil
+                end(activity.id, content(current))
+                updateConnection()
+            } else {
+                end(activity.id, CookActivityContentState(temperatureUnit: .fahrenheit))
+            }
+        case .cook(let cook) where cook.status != .active:
+            if let current = tracked[cook.id], current.activityID == activity.id {
+                cookChanged(cook)
+            } else {
+                end(activity.id, content(Tracked(activityID: activity.id, cook: cook)))
+            }
+            onCookStopped(cook)
+        case .cook(let cook):
+            if let current = tracked[cook.id] {
+                // A second activity for a cook that already has one.
+                if current.activityID != activity.id {
+                    end(activity.id, content(current))
+                }
+                return
+            }
+            let adopted = Tracked(activityID: activity.id, cook: cook, reading: nil)
+            tracked[cook.id] = adopted
+            activities.update(activity.id, content(adopted))
+            updateConnection()
+        }
+    }
+
+    private func end(_ activityID: String, _ state: CookActivityContentState) {
+        ended.insert(activityID)
+        activities.end(activityID, state)
     }
 
     /// Stops following readings. The activities stay.
