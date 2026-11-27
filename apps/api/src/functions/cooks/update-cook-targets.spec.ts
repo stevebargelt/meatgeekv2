@@ -313,6 +313,23 @@ describe('PUT /cooks/{cookId}/targets', () => {
       expect(h.stored()['targetsSeen']).toBeUndefined();
     });
 
+    it('keeps the watermark while a new reading is pending, even when the next falls short', async () => {
+      const h = new Harness();
+      h.seed({ targetTemps: { probe1: 165 } });
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+      await h.put({ probe1: 168 });
+
+      await h.readings({ n: 3, probe1Temp: 170 });
+      await h.readings({ n: 4, probe1Temp: 160 });
+      expect(h.stored()['targetsPending']).toBeUndefined();
+
+      // The old batch is delivered again after the pending reading went.
+      await h.readings({ n: 1, probe1Temp: 170 }, { n: 2, probe1Temp: 171 });
+      expect(h.stored()['targetsReached']).toBeUndefined();
+      expect(h.stored()['targetsPending']).toBeUndefined();
+      expect(h.stored()['targetsSeen']).toEqual({ probe1: at(2) });
+    });
+
     it('keeps the watermark across a second change before any new reading', async () => {
       const h = new Harness();
       h.seed({ targetTemps: { probe1: 165 }, targetsReached: { probe1: { reachedAt: at(2) } } });

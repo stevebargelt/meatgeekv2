@@ -152,11 +152,12 @@ export function applyReadings(
       if (value >= target) {
         if (pendingAt === undefined) {
           pending[channel] = at;
-          // The pending time is newer than the watermark and guards from here.
-          delete seen[channel];
         } else {
           reached[channel] = { reachedAt: at };
           delete pending[channel];
+          // The reached time is newer than the watermark and guards from here.
+          // (A pending time does not: it goes when a reading falls short.)
+          delete seen[channel];
         }
         changed = true;
       } else if (pendingAt !== undefined) {
