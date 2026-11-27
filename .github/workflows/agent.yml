@@ -1,8 +1,8 @@
 name: Agent
 
 # Runs Claude Code on an issue labelled ready-for-agent, once nothing blocks it.
-# The run ends in a pull request for the owner to merge, or, when the agent can't
-# finish, in a comment and the ready-for-human label.
+# The run ends in a draft pull request, which agent-review.yml reviews next, or,
+# when the agent can't finish, in a comment and the ready-for-human label.
 #
 # - Adding ready-for-agent starts a run, but only when every issue blocking it is
 #   closed as completed: GitHub's blocked-by links, plus any "Blocked by: #n" line
@@ -179,12 +179,11 @@ jobs:
                or `supabase`, and never deploy: a step that needs the owner's account or device is left undone
                and listed in the pull request.
             3. Commit on your branch following AGENTS.md's commit conventions, referencing `#${{ needs.gate.outputs.issue }}`.
-            4. Review your change with the code-review skill against `origin/${{ github.event.repository.default_branch }}`,
-               using this issue as the spec. Fix every real finding, then re-run the checks. Repeat at most twice.
-            5. Push, then `gh pr create --base ${{ github.event.repository.default_branch }} --fill-first` with a body
-               that starts with `Closes #${{ needs.gate.outputs.issue }}` and lists anything you left undone and why.
+            4. Push, then `gh pr create --draft --base ${{ github.event.repository.default_branch }} --fill-first` with a
+               body that starts with `Closes #${{ needs.gate.outputs.issue }}` and ends with a "Left undone" section:
+               anything you did not do and why, or "Nothing". A separate review agent reviews the draft next.
 
-            If you cannot get the checks green or the review clean, do not open a pull request. Instead comment
+            If you cannot get the checks green, do not open a pull request. Instead comment
             on the issue with what you tried and where it stuck, and run
             `gh issue edit ${{ needs.gate.outputs.issue }} --remove-label ready-for-agent --add-label ready-for-human`.
 
