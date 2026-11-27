@@ -36,6 +36,7 @@ yet wired.
 | `updateRecipe`           | HTTP `PATCH`  | `recipes/{id}`                    | Change any recipe field (409 on a race)                       |
 | `deleteRecipe`           | HTTP `DELETE` | `recipes/{id}`                    | Delete one of the caller's recipes                            |
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
+| `apnsHealth`             | HTTP `GET`    | `health/apns`                     | #243 — signs a provider token through Key Vault and checks Apple accepts it |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
 | `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
 | `recordTargetsReached`   | **Event Hub** | `temperature-data`, many          | Records on each running cook which targets are reached        |

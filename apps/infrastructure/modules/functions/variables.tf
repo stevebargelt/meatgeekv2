@@ -229,6 +229,50 @@ variable "apns_key_name" {
   }
 }
 
+variable "apns_key_id" {
+  description = "The APNs key's 10-character id (non-secret, but it names the owner's Apple account, so it comes from a GitHub secret), published as APNS_KEY_ID when apns_key_vault_uri is set. Empty publishes nothing."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^([A-Z0-9]{10})?$", var.apns_key_id))
+    error_message = "apns_key_id must be empty or 10 uppercase letters and digits."
+  }
+}
+
+variable "apns_team_id" {
+  description = "The Apple Developer team id (10 characters; never committed), published as APNS_TEAM_ID when apns_key_vault_uri is set. Empty publishes nothing."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^([A-Z0-9]{10})?$", var.apns_team_id))
+    error_message = "apns_team_id must be empty or 10 uppercase letters and digits."
+  }
+}
+
+variable "apns_bundle_id" {
+  description = "The iOS app's bundle id, the APNs topic (non-secret), published as APNS_BUNDLE_ID when apns_key_vault_uri is set. Empty publishes nothing."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^([A-Za-z0-9.-]{3,155})?$", var.apns_bundle_id))
+    error_message = "apns_bundle_id must be empty or a reverse-DNS bundle id."
+  }
+}
+
+variable "apns_host" {
+  description = "The APNs host the API calls (non-secret): api.sandbox.push.apple.com or api.push.apple.com. Published as APNS_HOST when apns_key_vault_uri is set. Empty publishes nothing."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "api.sandbox.push.apple.com", "api.push.apple.com"], var.apns_host)
+    error_message = "apns_host must be empty, api.sandbox.push.apple.com or api.push.apple.com."
+  }
+}
+
 # --- HTTP posture (S2) ------------------------------------------------------
 
 variable "cors_allowed_origins" {

@@ -60,6 +60,8 @@ public struct StubAPI: APIProtocol {
         = { _ in throw NotStubbed(operationID: "deleteRecipe") }
     public var getCosmosHealthHandler: @Sendable (Operations.GetCosmosHealth.Input) async throws -> Operations.GetCosmosHealth.Output
         = { _ in throw NotStubbed(operationID: "getCosmosHealth") }
+    public var getApnsHealthHandler: @Sendable (Operations.GetApnsHealth.Input) async throws -> Operations.GetApnsHealth.Output
+        = { _ in throw NotStubbed(operationID: "getApnsHealth") }
 }
 
 extension StubAPI {
@@ -145,6 +147,10 @@ extension StubAPI {
 
     public func getCosmosHealth(_ input: Operations.GetCosmosHealth.Input) async throws -> Operations.GetCosmosHealth.Output {
         try await getCosmosHealthHandler(input)
+    }
+
+    public func getApnsHealth(_ input: Operations.GetApnsHealth.Input) async throws -> Operations.GetApnsHealth.Output {
+        try await getApnsHealthHandler(input)
     }
 }
 

@@ -1250,6 +1250,12 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'DELETE' && recipeMatch) route = 'DELETE /recipes/{id}';
       else if (request.method === 'POST' && url.pathname === '/api/negotiate')
         route = 'POST /negotiate';
+      // #243: GET /health/apns answers healthy, with no request charge (it
+      // reads no Cosmos). It is not a StubRoute: no proof counts it.
+      if (request.method === 'GET' && url.pathname === '/api/health/apns') {
+        send(200, { status: 'healthy', responseTime: 120, requestId: responseRequestId });
+        return;
+      }
       if (!route) {
         send(404, errorBody('NOT_FOUND'));
         return;

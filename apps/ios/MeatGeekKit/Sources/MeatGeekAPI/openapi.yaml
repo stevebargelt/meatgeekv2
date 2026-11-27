@@ -1597,6 +1597,119 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CosmosHealthResponse'
+  /health/apns:
+    get:
+      operationId: getApnsHealth
+      summary: Check the API's own path to Apple's push service
+      description: |
+        Signs an APNs provider token through Key Vault under the Function App's
+        managed identity and sends one push to a made-up device token on the
+        configured APNs host. Apple checks the provider token before the device
+        token, so `400 BadDeviceToken` proves Apple accepted the token and is
+        the healthy answer. Nothing reaches a device.
+
+        The handler does not read the caller's principal: authentication is App
+        Service Authentication's, which answers 401 before the function runs.
+        The body never carries a token, the key, a team id or a dependency's
+        error text.
+      tags:
+        - health
+      responses:
+        '200':
+          description: Healthy. `status` is `healthy`; there is no `error`.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                type: object
+                description: |
+                  Body of GET /health/apns (apps/api/src/functions/health/apns-health.ts).
+                  An allowlisted projection: never a token, the key, a team id or a
+                  dependency's error text.
+                required:
+                  - status
+                  - responseTime
+                  - requestId
+                additionalProperties: false
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - healthy
+                      - unhealthy
+                  responseTime:
+                    type: number
+                    minimum: 0
+                    description: Milliseconds the probe took.
+                  error:
+                    type: string
+                    description: |
+                      Present only when unhealthy. A fixed code: the name of a missing APNs
+                      setting (`APNS_KEY_ID_missing`, ...), `key_vault_token_failed`,
+                      `key_vault_sign_failed`, `key_vault_bad_signature`, `apns_unreachable`
+                      or `apns_rejected`.
+                    example: apns_rejected
+                  reason:
+                    type: string
+                    description: Apple's own reason word when it refused the push, e.g. `InvalidProviderToken`.
+                  probeStatusCode:
+                    type: integer
+                    description: The numeric status Apple or Key Vault answered with.
+                  requestId:
+                    type: string
+                    description: The Functions invocation id.
+        '401':
+          $ref: '#/components/responses/PlatformUnauthenticated'
+        '503':
+          description: |
+            Unhealthy. `status` is `unhealthy`; `error` is a fixed code, with
+            Apple's `reason` (for example `InvalidProviderToken`) and
+            `probeStatusCode` when the dependency answered.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/X-Request-ID'
+          content:
+            application/json:
+              schema:
+                type: object
+                description: |
+                  Body of GET /health/apns (apps/api/src/functions/health/apns-health.ts).
+                  An allowlisted projection: never a token, the key, a team id or a
+                  dependency's error text.
+                required:
+                  - status
+                  - responseTime
+                  - requestId
+                additionalProperties: false
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - healthy
+                      - unhealthy
+                  responseTime:
+                    type: number
+                    minimum: 0
+                    description: Milliseconds the probe took.
+                  error:
+                    type: string
+                    description: |
+                      Present only when unhealthy. A fixed code: the name of a missing APNs
+                      setting (`APNS_KEY_ID_missing`, ...), `key_vault_token_failed`,
+                      `key_vault_sign_failed`, `key_vault_bad_signature`, `apns_unreachable`
+                      or `apns_rejected`.
+                    example: apns_rejected
+                  reason:
+                    type: string
+                    description: Apple's own reason word when it refused the push, e.g. `InvalidProviderToken`.
+                  probeStatusCode:
+                    type: integer
+                    description: The numeric status Apple or Key Vault answered with.
+                  requestId:
+                    type: string
+                    description: The Functions invocation id.
 x-signalr:
   hub: temperatureHub
   negotiate: /negotiate

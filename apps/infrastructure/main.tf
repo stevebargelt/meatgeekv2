@@ -403,6 +403,14 @@ module "azure_functions" {
   apns_key_vault_uri = var.apns_key_vault_enabled ? module.apns_key_vault[0].vault_uri : ""
   apns_key_name      = var.apns_key_vault_enabled ? module.apns_key_vault[0].key_name : ""
 
+  # The rest of what the API needs to call Apple (#243): identifiers, not keys.
+  # The key id and team id arrive from the deployment's GitHub secrets
+  # (TF_VAR_*), the bundle id and host from the tfvars.
+  apns_key_id    = var.apns_key_id
+  apns_team_id   = var.apns_team_id
+  apns_bundle_id = var.apns_bundle_id
+  apns_host      = var.apns_host
+
   # S2 HTTP posture — explicit per-environment CORS + optional Entra ID auth.
   cors_allowed_origins            = var.functions_cors_allowed_origins
   auth_active_directory_client_id = var.functions_auth_client_id

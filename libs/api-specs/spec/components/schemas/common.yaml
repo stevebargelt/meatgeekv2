@@ -245,6 +245,45 @@ CosmosHealthResponse:
       type: string
       description: The Functions invocation id.
 
+ApnsHealthResponse:
+  type: object
+  description: |
+    Body of GET /health/apns (apps/api/src/functions/health/apns-health.ts).
+    An allowlisted projection: never a token, the key, a team id or a
+    dependency's error text.
+  required:
+    - status
+    - responseTime
+    - requestId
+  additionalProperties: false
+  properties:
+    status:
+      type: string
+      enum:
+        - healthy
+        - unhealthy
+    responseTime:
+      type: number
+      minimum: 0
+      description: Milliseconds the probe took.
+    error:
+      type: string
+      description: |
+        Present only when unhealthy. A fixed code: the name of a missing APNs
+        setting (`APNS_KEY_ID_missing`, ...), `key_vault_token_failed`,
+        `key_vault_sign_failed`, `key_vault_bad_signature`, `apns_unreachable`
+        or `apns_rejected`.
+      example: apns_rejected
+    reason:
+      type: string
+      description: Apple's own reason word when it refused the push, e.g. `InvalidProviderToken`.
+    probeStatusCode:
+      type: integer
+      description: The numeric status Apple or Key Vault answered with.
+    requestId:
+      type: string
+      description: The Functions invocation id.
+
 TemperatureUnit:
   type: string
   description: User-facing temperature unit.

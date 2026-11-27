@@ -254,3 +254,9 @@ dps_ci_enroller_enabled = true
 # 2026-11-26, which put the role in the live ABAC condition.
 apns_key_vault_enabled  = true
 apns_key_signer_enabled = true
+
+# #243 what the API needs to call Apple. Neither is account-specific. The key id
+# and team id are not here: they come from the APNS_KEY_ID and APNS_TEAM_ID
+# GitHub secrets as TF_VAR_apns_key_id and TF_VAR_apns_team_id.
+apns_bundle_id = "com.meatgeek.ios"
+apns_host      = "api.sandbox.push.apple.com"

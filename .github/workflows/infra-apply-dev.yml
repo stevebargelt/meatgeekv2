@@ -367,6 +367,11 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       TF_IN_AUTOMATION: 'true'
       TF_INPUT: '0'
+      # The APNs key id and Apple team id name the owner's Apple account, so they live in
+      # this environment's secrets (bin/apns-key-vault-import in the home repo sets them),
+      # not in dev.tfvars. Published to the Function App as APNS_KEY_ID / APNS_TEAM_ID.
+      TF_VAR_apns_key_id: ${{ secrets.APNS_KEY_ID }}
+      TF_VAR_apns_team_id: ${{ secrets.APNS_TEAM_ID }}
       # DESTRUCTIVE-CHANGE AUTHORIZATION comes ONLY from the branch-restricted,
       # reviewer-approved workflow_dispatch RECOVERY input. It is deliberately NOT
       # sourced from a repository/environment variable: a variable is sticky, and
