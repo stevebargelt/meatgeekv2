@@ -96,6 +96,8 @@ enum AccessibilityID {
     static let chartEmpty = "chart.empty"
     static let liveBadge = "live.badge"
     static func liveChannel(_ channel: String) -> String { "live.channel.\(channel)" }
+    static func liveTarget(_ channel: String) -> String { "live.target.\(channel)" }
+    static func liveReached(_ channel: String) -> String { "live.reached.\(channel)" }
     static let liveReadingTime = "live.readingTime"
     static let liveWaiting = "live.waiting"
     static let liveSignedOut = "live.signedOut"

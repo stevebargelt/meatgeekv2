@@ -60,6 +60,30 @@ public struct LiveReading: Equatable, Sendable {
 public enum LiveChannel: String, CaseIterable, Sendable {
     case grill, probe1, probe2, probe3, probe4
 
+    /// The channel's key in a cook's targets.
+    public var targetKey: TargetKey {
+        switch self {
+        case .grill: .grill
+        case .probe1: .probe1
+        case .probe2: .probe2
+        case .probe3: .probe3
+        case .probe4: .probe4
+        }
+    }
+
+    /// When the server recorded this channel reaching its target; nil when
+    /// it has not.
+    public func reachedAt(in reached: Components.Schemas.TargetsReached?) -> Date? {
+        guard let reached else { return nil }
+        switch self {
+        case .grill: return reached.grill?.reachedAt
+        case .probe1: return reached.probe1?.reachedAt
+        case .probe2: return reached.probe2?.reachedAt
+        case .probe3: return reached.probe3?.reachedAt
+        case .probe4: return reached.probe4?.reachedAt
+        }
+    }
+
     public var label: String {
         switch self {
         case .grill: "Grill"
@@ -94,7 +118,22 @@ public struct LivePanelDisplay: Equatable, Sendable {
         public let channel: LiveChannel
         public let label: String
         public let text: String
+        /// "Target 203 °F", in the device's unit; nil when the channel has
+        /// no target or no reading.
+        public let target: String?
+        /// "✓ Reached 3:42 PM", the local time the server recorded; nil
+        /// unless this probe has a target, a reading, and the server says
+        /// it is reached. Never set for the grill.
+        public let reached: String?
         public var id: String { channel.rawValue }
+
+        public init(channel: LiveChannel, label: String, text: String, target: String? = nil, reached: String? = nil) {
+            self.channel = channel
+            self.label = label
+            self.text = text
+            self.target = target
+            self.reached = reached
+        }
     }
 }
 
@@ -111,6 +150,10 @@ public struct LivePanelDisplay: Equatable, Sendable {
 /// start and reconnect backfills with `GET /temperatures/current/{deviceId}`,
 /// keeping whichever reading is newer. On `cook_stopped` for this cook it
 /// stops the connection and hands the stopped cook to `onCookStopped`.
+///
+/// Beside each reading it shows the channel's target and, for a probe, the
+/// reached mark: both from the cook as the server last returned it
+/// (`cookChanged(_:)`). The app runs no target rule of its own.
 @MainActor
 @Observable
 public final class LivePanelModel {
@@ -130,6 +173,10 @@ public final class LivePanelModel {
     public private(set) var reading: LiveReading?
     /// The cook as `cook_stopped` delivered it, once this cook has stopped.
     public private(set) var stoppedCook: Cook?
+    /// The cook's targets, in °F, as the server last returned them.
+    public private(set) var targets: Components.Schemas.TargetTemperatures?
+    /// The channels the server says have reached their target.
+    public private(set) var reached: Components.Schemas.TargetsReached?
 
     @ObservationIgnored private let session: SessionModel
     @ObservationIgnored private let device: @MainActor () -> Device?
@@ -165,6 +212,8 @@ public final class LivePanelModel {
     ) {
         self.cookID = cook.id
         self.deviceID = cook.deviceId
+        self.targets = cook.targetTemps
+        self.reached = cook.targetsReached
         self.session = session
         self.device = device
         self.services = services
@@ -200,6 +249,14 @@ public final class LivePanelModel {
         guard stoppedCook == nil else { return }
         stoppedCook = cook
         update()
+    }
+
+    /// The cook as the server returned it again: its targets and reached
+    /// state replace the shown ones. Another cook is ignored.
+    public func cookChanged(_ cook: Cook) {
+        guard cook.id == cookID else { return }
+        targets = cook.targetTemps
+        reached = cook.targetsReached
     }
 
     /// Whether a connection is open (or retrying).
@@ -310,14 +367,24 @@ public final class LivePanelModel {
         display(at: now())
     }
 
-    public func display(at now: Date) -> LivePanelDisplay {
+    /// - Parameters:
+    ///   - locale, timeZone: how a reached time reads; the user's own by default.
+    public func display(
+        at now: Date, locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent
+    ) -> LivePanelDisplay {
         let unit = self.unit
         let age = reading?.date.map { max(0, now.timeIntervalSince($0)) }
         let (state, badge) = Self.panelState(status: status, hasReading: reading != nil, age: age, staleAfter: staleAfter)
         let channels = LiveChannel.allCases.map { channel in
-            LivePanelDisplay.Channel(
+            let value = reading?.value(channel)
+            // A channel with no reading, or no target, shows only its reading.
+            let target = value == nil ? nil : channel.targetKey.value(in: targets)
+            let reachedAt = target == nil || channel == .grill ? nil : channel.reachedAt(in: reached)
+            return LivePanelDisplay.Channel(
                 channel: channel, label: channel.label,
-                text: LiveText.temperature(reading?.value(channel), unit: unit)
+                text: LiveText.temperature(value, unit: unit),
+                target: target.map { "Target \(LiveText.temperature($0, unit: unit))" },
+                reached: reachedAt.map { "✓ Reached \(LiveText.time($0, locale: locale, timeZone: timeZone))" }
             )
         }
         let readingTime: String
@@ -367,6 +434,11 @@ public enum LiveText {
         let value = unit == .celsius ? (fahrenheit - 32) * 5 / 9 : fahrenheit
         let rounded = (value * 10 + 0.5).rounded(.down) / 10
         return rounded == 0 ? 0 : rounded
+    }
+
+    /// A time of day in the user's locale and time zone, "3:42 PM".
+    public static func time(_ date: Date, locale: Locale = .autoupdatingCurrent, timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: timeZone))
     }
 
     public static func symbol(_ unit: TemperatureUnit) -> String {

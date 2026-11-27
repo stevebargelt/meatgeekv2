@@ -511,6 +511,19 @@ SignalR (HAR-167). It ports the web app's `apps/web/src/live`: `hub.ts`,
   the panel every second (`TimelineView`), so the age advances without a new
   message. `cook_stopped` for this cook stops the connection and shows the cook
   as ended, here and in the lists.
+- **Targets and reached marks** (#239): a channel with a target and a reading
+  shows "Target 203 °F" under its reading, in the device's unit, converted
+  and rounded as readings are. A probe the server reports in the cook's
+  `targetsReached` shows "✓ Reached 3:42 PM", the local time it was reached;
+  the grill never shows a mark. A channel with no target or no reading shows
+  only its reading. The app runs no target rule: after each pushed reading
+  `CookDetailModel` reads `GET /cooks/{cookId}` again and hands the cook to
+  the panel (`cookChanged(_:)`), so a mark appears and clears with no
+  refresh. The server records the rule from the same readings on its own
+  consumer, so a mark can show one reading late. One re-read is in flight at a
+  time; readings during it cost one more. A failed re-read changes nothing,
+  and one answered after the cook was shown again (stopped, reloaded) is
+  dropped.
 - **Foreground and background**: the panel is connected only while the cook
   screen shows and the scene is active. Leaving `.active` stops the
   connection; coming back negotiates again, starts a new one and backfills.
@@ -531,7 +544,10 @@ use: Drop connection (every hub closes; the retry wait then lasts until)
 Reconnect now, Advance clock 3 min (the reading goes stale), and Send
 cook_stopped (stops the cook as another client would).
 `testStartCookListOpenStop` drives push → drop → "Reconnecting…" → reconnect →
-a new reading → stale; `testCookStoppedEndsTheLiveCook` drives `cook_stopped`.
+a new reading → stale, and sees the probe 1 target set on the start form
+beside its reading; `testCookStoppedEndsTheLiveCook` drives `cook_stopped`.
+The stub runs no target rule, so no reached mark shows in UI test mode; the
+marks are unit tested.
 
 ## Cook chart
 
