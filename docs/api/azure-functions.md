@@ -20,6 +20,7 @@ yet wired.
 | `getCook`                | HTTP `GET`    | `cooks/{cookId}`                  | One of the caller's cooks (404 for another user's)            |
 | `getCookChart`           | HTTP `GET`    | `cooks/{cookId}/chart`            | HAR-86 — the whole cook as ≤ 720 points, from the rollups     |
 | `stopCook`               | HTTP `POST`   | `cooks/{cookId}/stop`             | Stop a cook (emits `cook_stopped` on SignalR)                 |
+| `updateCookTargets`      | HTTP `PUT`    | `cooks/{cookId}/targets`          | #240 — set, change, clear a running cook's targets (re-arms)  |
 | `negotiate`              | HTTP `POST`   | `negotiate`                       | SignalR client negotiate: a token for the caller's userId     |
 | `getCurrentTemperatures` | HTTP `GET`    | `temperatures/current/{deviceId}` | Latest reading for a caller's device (404 else)               |
 | `getTemperatureHistory`  | HTTP `GET`    | `temperatures/history`            | A page of a caller's device's readings, by continuation token |

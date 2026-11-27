@@ -795,6 +795,165 @@ struct CookDetailModelTests {
     }
 }
 
+// MARK: - Changing a running cook's targets
+
+@Suite("EditTargetsModel")
+@MainActor
+struct EditTargetsModelTests {
+    typealias F = CookFixtures
+    typealias Body = Components.Schemas.UpdateCookTargetsRequest
+
+    nonisolated static let active = CookDetailModelTests.active
+
+    static func api(
+        bodies: Recorder<Body> = Recorder(),
+        get: @escaping @Sendable (String) -> Operations.GetCook.Output = { _ in .ok(.init(body: .json(active))) },
+        update: @escaping @Sendable (String, Body) -> Operations.UpdateCookTargets.Output = { _, body in
+            var saved = active
+            let t = body.targetTemps
+            saved.targetTemps = .init(grill: t.grill, probe1: t.probe1, probe2: t.probe2, probe3: t.probe3, probe4: t.probe4)
+            return .ok(.init(body: .json(saved)))
+        }
+    ) -> StubAPI {
+        var api = CookDetailModelTests.api(get: get)
+        api.updateCookTargetsHandler = { input in
+            guard case .json(let body) = input.body else { return .undocumented(statusCode: 415, .init()) }
+            bodies.record(body)
+            return update(input.path.cookId, body)
+        }
+        return api
+    }
+
+    @Test("a running cook offers editing, filled with its targets; an ended cook offers none")
+    func offered() async throws {
+        let (_, _, _, model) = await CookDetailModelTests.detail(Self.api())
+        let edit = try #require(model.editTargets())
+        #expect(edit.cookID == "c1")
+        #expect(TargetKey.allCases.map { edit[target: $0] } == ["225", "", "203", "", ""])
+
+        let ended = { var cook = Self.active; cook.status = .completed; return cook }()
+        let (_, _, _, endedModel) = await CookDetailModelTests.detail(Self.api(get: { _ in .ok(.init(body: .json(ended))) }))
+        #expect(endedModel.cook?.status == .completed)
+        #expect(endedModel.editTargets() == nil)
+    }
+
+    @Test("the start form's messages; nothing is sent while a field is wrong")
+    func validation() async throws {
+        let bodies = Recorder<Body>()
+        let (_, _, _, model) = await CookDetailModelTests.detail(Self.api(bodies: bodies))
+        let edit = try #require(model.editTargets())
+        edit[target: .grill] = "-1"
+        edit[target: .probe1] = "hot"
+        edit[target: .probe4] = "1000.01"
+
+        #expect(await edit.save() == nil)
+
+        #expect(edit.fieldErrors == [
+            .grill: "Grill target must be a number from 0 to 1000.",
+            .probe1: "Probe 1 target must be a number from 0 to 1000.",
+            .probe4: "Probe 4 target must be a number from 0 to 1000.",
+        ])
+        #expect(edit.fieldErrors == CookValidation.validate(StartCookInput(name: "a", meatType: "b", targets: edit.input)).targets)
+        #expect(bodies.all.isEmpty)
+    }
+
+    @Test("save sends the whole set, a blank field clearing its target; the cook screen and the lists show the saved cook")
+    func save() async throws {
+        let bodies = Recorder<Body>()
+        let (_, _, cooks, model) = await CookDetailModelTests.detail(Self.api(bodies: bodies))
+        let edit = try #require(model.editTargets())
+        edit[target: .grill] = " "
+        edit[target: .probe2] = "165"
+        edit[target: .probe3] = " 150.5 "
+
+        let saved = try #require(await edit.save())
+
+        #expect(bodies.all == [Body(targetTemps: .init(probe2: 165, probe3: 150.5))])
+        #expect(saved.targetTemps == .init(probe2: 165, probe3: 150.5))
+        #expect(model.cook == saved)
+        #expect(model.targets(of: saved).map(\.text) == ["165 °F", "150.5 °F"])
+        #expect(cooks.cooks.first { $0.id == "c1" } == saved)
+        #expect(edit.fieldErrors.isEmpty)
+        #expect(edit.problem == nil)
+        #expect(!edit.saving)
+    }
+
+    @Test("every field blank clears every target")
+    func clearAll() async throws {
+        let bodies = Recorder<Body>()
+        let (_, _, _, model) = await CookDetailModelTests.detail(Self.api(bodies: bodies))
+        let edit = try #require(model.editTargets())
+        edit.input = [:]
+
+        _ = try #require(await edit.save())
+
+        #expect(bodies.all == [Body(targetTemps: .init())])
+        #expect(model.cook?.targetTemps == .init())
+    }
+
+    @Test("409 COOK_NOT_ACTIVE: says the cook has ended, and the screen reads the cook again")
+    func notActive() async throws {
+        let ended = Box(false)
+        let (_, _, _, model) = await CookDetailModelTests.detail(Self.api(
+            get: { _ in
+                var cook = Self.active
+                if ended.value { cook.status = .completed }
+                return .ok(.init(body: .json(cook)))
+            },
+            update: { _, _ in
+                .conflict(.init(body: .json(F.error(.cookNotActive, "Targets can be changed only on a running cook", "req-409"))))
+            }
+        ))
+        let edit = try #require(model.editTargets())
+        ended.value = true
+        edit[target: .probe1] = "165"
+
+        #expect(await edit.save() == nil)
+
+        #expect(edit.problem == APIProblem(
+            status: 409, code: "COOK_NOT_ACTIVE", message: EditTargetsModel.notActiveMessage, requestID: "req-409"
+        ))
+        #expect(EditTargetsModel.notActiveMessage == "This cook has ended, so its targets can no longer be changed.")
+        #expect(model.cook?.status == .completed)
+        #expect(model.editTargets() == nil)
+    }
+
+    @Test("400, 403, 404 and 500 keep the API's message and request id, and the cook as shown", arguments: [400, 403, 404, 500])
+    func refused(status: Int) async throws {
+        let (_, _, _, model) = await CookDetailModelTests.detail(Self.api(update: { _, _ in
+            let body = F.error(.validationError, "Refused \(status)", "req-\(status)")
+            switch status {
+            case 400: return .badRequest(.init(body: .json(body)))
+            case 403: return .forbidden(.init(body: .json(body)))
+            case 404: return .notFound(.init(body: .json(body)))
+            default: return .internalServerError(.init(body: .json(body)))
+            }
+        }))
+        let edit = try #require(model.editTargets())
+        edit[target: .probe1] = "165"
+
+        #expect(await edit.save() == nil)
+
+        #expect(edit.problem == APIProblem(
+            status: status, code: "VALIDATION_ERROR", message: "Refused \(status)", requestID: "req-\(status)"
+        ))
+        #expect(model.cook == Self.active)
+    }
+
+    @Test("a 401 signs the session out")
+    func unauthorized() async throws {
+        let (session, _, _, model) = await CookDetailModelTests.detail(Self.api(update: { _, _ in
+            .unauthorized(DeviceFixtures.unauthorized)
+        }))
+        let edit = try #require(model.editTargets())
+
+        #expect(await edit.save() == nil)
+
+        #expect(session.state == DeviceFixtures.ended)
+        #expect(edit.problem == nil)
+    }
+}
+
 // MARK: - UI test mode's cooks
 
 @Suite("UI test mode's cooks")
@@ -877,6 +1036,33 @@ struct StubCooksTests {
         let missing = CookDetailModel(cookID: "no-such-cook", cooks: cooks)
         await missing.start()
         #expect(missing.state == .notFound)
+    }
+
+    @Test("targets on a running cook are saved and read back; an ended cook is 409")
+    func targets() async throws {
+        let (_, devices, cooks) = await Self.signedIn()
+        let device = try #require(devices.device(id: StubDevices.connectedID))
+        let form = StartCookModel(device: device, cooks: cooks)
+        form.input = StartCookInput(name: "UI Brisket", meatType: "beef", targets: [.grill: "225", .probe1: "165"])
+        let cook = try #require(await form.submit())
+        let detail = CookDetailModel(cookID: cook.id, cooks: cooks)
+        await detail.start()
+
+        let edit = try #require(detail.editTargets())
+        #expect(edit[target: .probe1] == "165")
+        edit[target: .probe1] = "203"
+        let saved = try #require(await edit.save())
+        #expect(saved.targetTemps == .init(grill: 225, probe1: 203))
+        await detail.reload()
+        #expect(detail.cook?.targetTemps == .init(grill: 225, probe1: 203))
+
+        await detail.stop()
+        guard case .conflict = try await cooks.session.perform({ api in
+            try await api.updateCookTargets(path: .init(cookId: cook.id), body: .json(.init(targetTemps: .init(probe1: 1))))
+        }) else {
+            Issue.record("expected 409 on an ended cook")
+            return
+        }
     }
 
     @Test("a start on a device the user does not own is 403")

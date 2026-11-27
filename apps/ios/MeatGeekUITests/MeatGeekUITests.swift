@@ -34,6 +34,9 @@ final class MeatGeekUITests: XCTestCase {
         static let cookDetailStatus = "cookDetail.status"
         static let cookDetailEnded = "cookDetail.ended"
         static let cookDetailStop = "cookDetail.stop"
+        static let cookDetailEditTargets = "cookDetail.editTargets"
+        static func editTarget(_ key: String) -> String { "editTargets.target.\(key)" }
+        static let editTargetsSave = "editTargets.save"
         static let chart = "chart.chart"
         static let chartNotAvailable = "chart.notAvailable"
         static let chartError = "chart.error"
@@ -457,6 +460,22 @@ final class MeatGeekUITests: XCTestCase {
             app, "value == 'Grill, Probe 1; 1 point; latest Grill 228 °F, Probe 1 153 °F'", "this screen's pushed point"
         )
 
+        // Change probe 1's target on the running cook: the live screen shows
+        // the new one once the sheet closes, with no refresh.
+        scrollUntilExists(app, app.buttons[ID.cookDetailEditTargets], "Edit targets")
+        app.buttons[ID.cookDetailEditTargets].tap()
+        let editProbe1 = app.textFields[ID.editTarget("probe1")]
+        waitUntilExists(editProbe1, "the edit targets form")
+        XCTAssertEqual(editProbe1.value as? String, "203")
+        // The cursor at the end of "203", then the new value over it.
+        editProbe1.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        editProbe1.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 3) + "165")
+        screenshot(app, "10-edit-targets")
+        app.buttons[ID.editTargetsSave].tap()
+        let changedTarget = app.staticTexts[ID.liveTarget("probe1")]
+        scrollDownUntilExists(app, changedTarget, "probe 1's target on the live screen")
+        waitUntilLabel(changedTarget, "Probe 1, Target 165 °F", "the changed target on the live screen")
+
         // Stop, with confirmation: below the chart and the fields.
         scrollUntilExists(app, app.buttons[ID.cookDetailStop], "Stop cook")
         app.buttons[ID.cookDetailStop].tap()
@@ -470,6 +489,7 @@ final class MeatGeekUITests: XCTestCase {
         waitUntilLabel(app.staticTexts[ID.cookDetailStatus], "Status, Completed", "the cook's status")
         XCTAssertTrue(app.staticTexts[ID.cookDetailEnded].exists, "the end time is not shown")
         XCTAssertFalse(app.buttons[ID.cookDetailStop].exists, "Stop is still offered")
+        XCTAssertFalse(app.buttons[ID.cookDetailEditTargets].exists, "Edit targets is offered on an ended cook")
 
         // Completed: the chart is read again, and is now the stored series:
         // the stub buckets the four pushes by minute (225 and 226 at 18:00,

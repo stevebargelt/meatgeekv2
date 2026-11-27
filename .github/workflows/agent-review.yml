@@ -10,13 +10,13 @@ name: Agent review
 #
 # Adding the agent-review label to any pull request runs it again.
 # Installed by the home repo's bin/install-agent-action; change the template there.
-# pull_request_target, not pull_request: it runs this file as it is on the default
-# branch, so a template change applies to open pull requests too, and it fires even
-# while GitHub cannot build a pull request's merge commit (out of date or stuck), when
-# pull_request would silently run an old copy or nothing. It runs with secrets, so the
-# job takes only branches of this repository, never forks.
+# pull_request, not pull_request_target: the action swaps the run's OIDC token for the
+# Claude GitHub App's token, and that swap rejects pull_request_target ("Invalid OIDC
+# token"). The App token is what lets this run's pushes and its auto-merge start CI and
+# the deploy. Cost: a pull request runs this file from its merge ref, so an older pull
+# request needs its branch updated before a re-run picks up a template change.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, labeled]
 
 permissions:

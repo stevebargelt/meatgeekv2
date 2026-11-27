@@ -189,6 +189,7 @@ struct CookRow: View {
 struct CookDetailView: View {
     @State var model: CookDetailModel
     @State private var confirmingStop = false
+    @State private var editingTargets: EditTargetsModel?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -243,6 +244,9 @@ struct CookDetailView: View {
         } message: {
             Text(CookDetailModel.stopConfirmMessage)
         }
+        .sheet(item: $editingTargets) { edit in
+            EditTargetsView(model: edit)
+        }
     }
 
     private func fields(_ cook: Cook) -> some View {
@@ -289,6 +293,12 @@ struct CookDetailView: View {
             }
 
             if cook.status == .active {
+                Section {
+                    Button("Edit targets", systemImage: "target") {
+                        editingTargets = model.editTargets()
+                    }
+                    .accessibilityIdentifier(AccessibilityID.cookDetailEditTargets)
+                }
                 stopSection
             }
         }
@@ -320,6 +330,58 @@ struct CookDetailView: View {
         }
         .disabled(model.stopState == .stopping)
         .accessibilityIdentifier(AccessibilityID.cookDetailStop)
+    }
+}
+
+/// A running cook's targets, as on the start form. A sheet; Save closes it
+/// once the cook screen shows the saved targets.
+struct EditTargetsView: View {
+    @State var model: EditTargetsModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ForEach(TargetKey.allCases, id: \.self) { key in
+                        TextField(key.label, text: Binding(
+                            get: { model[target: key] },
+                            set: { model[target: key] = $0 }
+                        ))
+                        .keyboardType(.decimalPad)
+                        .accessibilityIdentifier(AccessibilityID.editTarget(key.rawValue))
+                        FieldError(message: model.fieldErrors[key])
+                    }
+                } header: {
+                    Text("Targets (°F, optional)")
+                } footer: {
+                    Text("Leave a target blank to clear it. A changed target can alert again.")
+                }
+                if let problem = model.problem {
+                    Section {
+                        ProblemText(problem: problem)
+                            .accessibilityIdentifier(AccessibilityID.editTargetsProblem)
+                    }
+                }
+            }
+            .navigationTitle("Edit targets")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(model.saving ? "Saving…" : "Save") {
+                        Task {
+                            if await model.save() != nil { dismiss() }
+                        }
+                    }
+                    .disabled(model.saving)
+                    .accessibilityIdentifier(AccessibilityID.editTargetsSave)
+                }
+            }
+            .interactiveDismissDisabled(model.saving)
+        }
     }
 }
 

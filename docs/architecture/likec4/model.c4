@@ -258,7 +258,7 @@ model {
           description 'The only source of the caller identity: tid:oid from the injected header. Fails closed (401, no default user).'
         }
         cooks = component 'cooks' {
-          description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop'
+          description 'GET /cooks, POST /cooks, GET /cooks/{cookId}, GET /cooks/{cookId}/chart, POST /cooks/{cookId}/stop, PUT /cooks/{cookId}/targets (the targets of a running cook; a changed one re-arms)'
         }
         devices = component 'devices' {
           description 'GET /devices, POST /devices/claim (the only way a device gets an owner; HAR-145 removed POST /devices), GET and PATCH /devices/{id}, and DELETE /devices/{id}, which is release (HAR-136: 409 COOK_ACTIVE while a cook is active; the next claim needs a fresh code)'
@@ -536,7 +536,7 @@ model {
         description 'Devices tab (`DevicesModel`): GET /devices with one GET /cooks?status=active for the list, rename (PATCH /devices/{id}) and release (DELETE /devices/{id}). A device is added only by claim (`ClaimDeviceModel`, POST /devices/claim) with the code it shows.'
       }
       cooks = component 'cooks' {
-        description 'Cooks tab: the list (`CooksModel`, GET /cooks with deviceId and status filters, "Load more" by continuation token), the start sheet (`StartCookModel`, POST /cooks with an id made once per form, so a retry is idempotent), the cook screen (`CookDetailModel`, GET /cooks/{cookId}) and stop (POST /cooks/{cookId}/stop).'
+        description 'Cooks tab: the list (`CooksModel`, GET /cooks with deviceId and status filters, "Load more" by continuation token), the start sheet (`StartCookModel`, POST /cooks with an id made once per form, so a retry is idempotent), the cook screen (`CookDetailModel`, GET /cooks/{cookId}), stop (POST /cooks/{cookId}/stop) and, on a running cook, Edit targets (`EditTargetsModel`, PUT /cooks/{cookId}/targets).'
       }
       livePanel = component 'live panel' {
         technology 'SignalR-Client-Swift 1.2.1 (MeatGeekLive)'
@@ -763,7 +763,7 @@ model {
       description 'Every call carries the user access token; Easy Auth validates it before any function runs.'
     }
     mobile.devices -> cloud.api.devices 'GET /devices; POST /devices/claim; PATCH, DELETE /devices/{id}'
-    mobile.cooks -> cloud.api.cooks 'GET, POST /cooks; GET /cooks/{cookId}; POST /cooks/{cookId}/stop'
+    mobile.cooks -> cloud.api.cooks 'GET, POST /cooks; GET /cooks/{cookId}; POST /cooks/{cookId}/stop; PUT /cooks/{cookId}/targets'
     mobile.shell -> entra 'auth code + PKCE (MSAL, system browser), no secret'
     mobile.livePanel -> cloud.api.negotiate 'POST /negotiate'
     mobile.livePanel -> cloud.realtime 'connects as the signed-in user' {

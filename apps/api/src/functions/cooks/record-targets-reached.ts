@@ -26,7 +26,7 @@ import {
   type AlertOutcome,
   type TemperatureUnit,
 } from './target-alerts';
-import { applyReadings, type TargetState } from './target-rule';
+import { applyReadings, nonEmpty, type TargetState } from './target-rule';
 
 /**
  * The target rule on the reading stream: records on each running cook which
@@ -200,10 +200,6 @@ async function alertCook(
   };
 }
 
-function nonEmpty<T extends object>(map: T): T | undefined {
-  return Object.keys(map).length > 0 ? map : undefined;
-}
-
 export async function recordTargetsReachedHandler(
   events: unknown,
   context: InvocationContext,
@@ -243,13 +239,14 @@ export async function recordTargetsReachedHandler(
   const outcomes = await Promise.all(
     [...cooks.values()].map(async group => {
       try {
-        const { outcome, cook } = await repository.updateActiveCook(group.userId, group.cookId, cook => {
+        const result = await repository.updateActiveCook(group.userId, group.cookId, cook => {
           if (cook.deviceId !== group.deviceId) {
             return undefined;
           }
           const before: TargetState = {
             targetsReached: cook.targetsReached ?? {},
             targetsPending: cook.targetsPending ?? {},
+            targetsSeen: cook.targetsSeen,
           };
           const after = applyReadings(before, cook.targetTemps, group.readings);
           if (after === before) {
@@ -260,14 +257,15 @@ export async function recordTargetsReachedHandler(
           return {
             targetsReached: nonEmpty(after.targetsReached),
             targetsPending: nonEmpty(after.targetsPending),
+            targetsSeen: nonEmpty(after.targetsSeen),
           };
         });
         // A cook on another device, or not running, sends nothing.
         const alerts =
-          outcome !== 'notActive' && cook && cook.deviceId === group.deviceId
-            ? await alertCook(group, cook, repository, deps)
+          result.outcome !== 'notActive' && result.stored.deviceId === group.deviceId
+            ? await alertCook(group, result.stored, repository, deps)
             : NO_ALERTS;
-        return { outcome, alerts };
+        return { outcome: result.outcome, alerts };
       } catch {
         return { outcome: 'failed' as const, alerts: NO_ALERTS };
       }
