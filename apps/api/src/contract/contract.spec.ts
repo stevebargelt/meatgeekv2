@@ -19,7 +19,7 @@ import * as path from 'path';
 import SwaggerParser from '@apidevtools/swagger-parser';
 import Ajv, { type ValidateFunction } from 'ajv';
 import addFormats from 'ajv-formats';
-import type { InvocationContext } from '@azure/functions';
+import type { HttpRequest, InvocationContext } from '@azure/functions';
 import { createNoopMeter } from '@opentelemetry/api';
 import { ERROR_CODES, type Cook } from '@meatgeekv2/api-interfaces';
 import type { OpenAPIV3 } from 'openapi-types';
@@ -35,7 +35,14 @@ import {
   TEMPERATURE,
   type SignalRTemperatureMessage,
 } from '../functions/signalr/envelope';
-import { principalFromHeaderValue, unauthenticatedResponse } from '../shared/auth/principal';
+import { listPushTokensHandler, registerPushTokenHandler } from '../functions/users/push-tokens';
+import {
+  principalFromHeaderValue,
+  principalFromRequest,
+  unauthenticatedResponse,
+} from '../shared/auth/principal';
+import { FakeDevicesContainer } from '../shared/cosmos/fake-devices-container.testing';
+import { PushTokensRepository } from '../shared/cosmos/push-tokens-repository';
 import {
   compareRoutes,
   formatRouteDrift,
@@ -527,5 +534,48 @@ describe('(d) SignalR: the messages the API builds match their x-signalr schemas
     expect(
       compile(signalR().messages[TEMPERATURE])({ deviceId: 'meatgeek3', timestamp: 'x' })
     ).toBe(false);
+  });
+});
+
+describe('#244: the push-token routes answer with the shapes the spec names', () => {
+  const token = 'ab'.repeat(32);
+  const principal = Buffer.from(
+    JSON.stringify({
+      claims: [
+        { typ: 'http://schemas.microsoft.com/identity/claims/objectidentifier', val: 'oid-1' },
+        { typ: 'http://schemas.microsoft.com/identity/claims/tenantid', val: 'tid-1' },
+      ],
+    })
+  ).toString('base64');
+
+  function request(body?: unknown) {
+    return {
+      json: async () => body,
+      headers: { get: (k: string) => (k.toLowerCase() === 'x-ms-client-principal' ? principal : null) },
+      query: { get: () => null },
+      params: {},
+    } as unknown as HttpRequest;
+  }
+  const context = () =>
+    ({ invocationId: 'inv', log: jest.fn(), error: jest.fn() }) as unknown as InvocationContext;
+
+  it('POST answers a PushToken, GET a PushTokenListResponse, and the token is in neither', async () => {
+    const repository = new PushTokensRepository(
+      new FakeDevicesContainer().asContainer(),
+      () => new Date('2026-11-27T10:00:00.000Z')
+    );
+    const deps = { resolvePrincipal: principalFromRequest, getRepository: () => repository };
+
+    expectValid(compile(schemaAt('RegisterPushTokenRequest')), { token });
+    const registered = await registerPushTokenHandler(request({ token }), context(), deps);
+    expect(registered.status).toBe(201);
+    expectValid(compile(schemaAt('PushToken')), registered.jsonBody);
+
+    const listed = await listPushTokensHandler(request(), context(), deps);
+    expectValid(compile(schemaAt('PushTokenListResponse')), listed.jsonBody);
+    expect(JSON.stringify([registered.jsonBody, listed.jsonBody])).not.toContain(token);
+    expect(compile(schemaAt('PushToken'))({ id: token.toUpperCase(), registeredAt: '2026-11-27T10:00:00.000Z' })).toBe(
+      false
+    );
   });
 });

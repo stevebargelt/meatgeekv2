@@ -7,7 +7,7 @@ import type {
   RequestOptions,
   SqlParameter,
 } from '@azure/cosmos';
-import type { Cook, CookStatus, TargetsPending } from '@meatgeekv2/api-interfaces';
+import type { Cook, CookStatus, TargetsAlerted, TargetsPending } from '@meatgeekv2/api-interfaces';
 
 import { getCosmosAdapter } from './cosmos-adapter';
 
@@ -57,9 +57,12 @@ void cookFieldsAreExhaustive;
 type StoredCook = Cook;
 
 /** A stored cook with the fields that are stored but never returned: the target
- *  rule's pending readings (see apps/api/src/functions/cooks/target-rule.ts). */
+ *  rule's pending readings (see apps/api/src/functions/cooks/target-rule.ts)
+ *  and, per channel, the `reachedAt` whose alert Apple accepted (#244, see
+ *  apps/api/src/functions/cooks/target-alerts.ts). */
 export interface StoredCookDocument extends Cook {
   targetsPending?: TargetsPending;
+  targetsAlerted?: TargetsAlerted;
 }
 
 /** What {@link CooksRepository.updateActiveCook} did. */
@@ -620,7 +623,12 @@ export class CooksRepository {
     userId: string,
     id: string,
     change: (cook: StoredCookDocument) => Partial<StoredCookDocument> | undefined
-  ): Promise<{ readonly outcome: ActiveCookUpdate; readonly requestCharge: number }> {
+  ): Promise<{
+    readonly outcome: ActiveCookUpdate;
+    readonly requestCharge: number;
+    /** The cook as stored afterwards; absent when it is `notActive`. */
+    readonly cook?: StoredCookDocument;
+  }> {
     let requestCharge = 0;
     for (let attempt = 1; ; attempt++) {
       const existing = await this.readCookWithEtag(userId, id);
@@ -631,14 +639,15 @@ export class CooksRepository {
       }
       const fields = change(document);
       if (fields === undefined) {
-        return { outcome: 'unchanged', requestCharge };
+        return { outcome: 'unchanged', requestCharge, cook: document };
       }
+      const next: StoredCookDocument = { ...document, ...fields };
       try {
         const response = await this.container
           .item(id, userId)
-          .replace<StoredCookDocument>({ ...document, ...fields }, ifMatch(existing.etag));
+          .replace<StoredCookDocument>(next, ifMatch(existing.etag));
         requestCharge += response.requestCharge;
-        return { outcome: 'updated', requestCharge };
+        return { outcome: 'updated', requestCharge, cook: next };
       } catch (error) {
         if (statusCodeOf(error) === 412 && attempt < UPDATE_ACTIVE_COOK_MAX_ATTEMPTS) {
           continue;

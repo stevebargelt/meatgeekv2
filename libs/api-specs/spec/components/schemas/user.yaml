@@ -190,3 +190,49 @@ PutUserProfileRequest:
         (or DEFAULT_USER_PREFERENCES on create): plain objects merge key by
         key; scalars and arrays replace. Must be an object if present.
       additionalProperties: true
+
+RegisterPushTokenRequest:
+  type: object
+  description: |
+    Body for POST /users/me/push-tokens: the APNs device token the iOS app
+    was given, in hex. Any other field is rejected with 400
+    VALIDATION_ERROR. The token travels only here: it is never returned,
+    never in a URL and never logged.
+  required:
+    - token
+  additionalProperties: false
+  properties:
+    token:
+      type: string
+      pattern: '^[0-9a-fA-F]{64,200}$'
+      description: The APNs device token, as hex. Case does not matter.
+
+PushToken:
+  type: object
+  description: |
+    A phone registered for the caller's alerts, by its id: the SHA-256 of
+    its APNs device token, in lowercase hex. The app can compute the id
+    from its own token; the id says nothing about the token.
+  required:
+    - id
+    - registeredAt
+  additionalProperties: false
+  properties:
+    id:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+    registeredAt:
+      $ref: './common.yaml#/ISODateTime'
+
+PushTokenListResponse:
+  type: object
+  description: The caller's registered phones.
+  required:
+    - items
+  additionalProperties: false
+  properties:
+    items:
+      type: array
+      maxItems: 10
+      items:
+        $ref: '#/PushToken'

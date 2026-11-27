@@ -36,6 +36,11 @@ import { updateDeviceHandler } from './functions/devices/update-device';
 import { deleteDeviceHandler } from './functions/devices/delete-device';
 import { getUserProfileHandler } from './functions/users/get-user-profile';
 import { putUserProfileHandler } from './functions/users/put-user-profile';
+import {
+  deletePushTokenHandler,
+  listPushTokensHandler,
+  registerPushTokenHandler,
+} from './functions/users/push-tokens';
 import { listRecipesHandler } from './functions/recipes/list-recipes';
 import { createRecipeHandler } from './functions/recipes/create-recipe';
 import { getRecipeHandler } from './functions/recipes/get-recipe';
@@ -131,7 +136,8 @@ app.eventHub('broadcastTemperature', {
 });
 
 // The target rule: records on each running cook which channels have reached
-// their target. It reads the same readings on its OWN consumer group
+// their target, and (#244) sends an alert for each reach to every phone the
+// cook's owner registered, through APNs. It reads the same readings on its OWN consumer group
 // (TARGETS_CONSUMER_GROUP, `api-targets`), so it is a separate invocation from
 // broadcastTemperature and can never delay or drop a live push. It has no
 // SignalR output. A batch whose cook write failed throws and is retried by the
@@ -243,6 +249,30 @@ app.http('putUserProfile', {
   authLevel: 'anonymous',
   route: 'users/me',
   handler: putUserProfileHandler,
+});
+
+// #244: the caller's phones, by their APNs device token. The token travels in
+// the POST body only; GET and DELETE use its id (the token's SHA-256), so no
+// token is ever in a URL or a request log.
+app.http('listPushTokens', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'users/me/push-tokens',
+  handler: listPushTokensHandler,
+});
+
+app.http('registerPushToken', {
+  methods: ['POST'],
+  authLevel: 'anonymous',
+  route: 'users/me/push-tokens',
+  handler: registerPushTokenHandler,
+});
+
+app.http('deletePushToken', {
+  methods: ['DELETE'],
+  authLevel: 'anonymous',
+  route: 'users/me/push-tokens/{tokenId}',
+  handler: deletePushTokenHandler,
 });
 
 // HAR-36 (MG-82): the caller's recipes, private to the owner. The recipes

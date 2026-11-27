@@ -220,6 +220,15 @@ The live acceptance proof `apns health` (`apps/api/acceptance/proofs/apns-health
 runs it in Deploy Dev App. It needs the key imported (step 6) and the two
 secrets set (step 8).
 
+### Target alerts (#244)
+
+`recordTargetsReached` sends each reached target to the cook owner's phones
+through the same client and provider-token cache (`shared/apns/shared-client.ts`),
+so the alerts add no setting and no grant. The `targets reached` acceptance
+proof registers the same made-up token as a phone; Apple answering its alert
+`BadDeviceToken` makes the API delete it, and the proof sees it gone. See
+[Data Flow](../architecture/data-flow.md#6-target-rule).
+
 ### If Key Vault cannot sign with the imported key
 
 Two assumptions here come from the documentation and are settled by the first

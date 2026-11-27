@@ -270,7 +270,12 @@ model {
           description 'GET and POST /recipes, GET, PATCH and DELETE /recipes/{id}'
         }
         users = component 'users' {
-          description 'GET and PUT /users/me'
+          description '''
+            GET and PUT /users/me. #244: GET and POST /users/me/push-tokens and DELETE
+            /users/me/push-tokens/{tokenId}, the phones target alerts go to. A phone is its APNs
+            device token, sent in the POST body only; it is never returned, never in a URL and
+            never logged, and is known everywhere else by its id, the token's SHA-256.
+          '''
         }
         negotiate = component 'negotiate' {
           technology 'SignalR data-plane REST API, managed identity'
@@ -319,6 +324,16 @@ model {
             the grill never re-arms by falling. State is on the cook document, written by an
             If-Match replace only when a channel's state changes. A failed write throws and the
             host retries the batch; readings already counted are ignored.
+
+            Alerts (#244): each reach not yet alerted is sent to every phone the cook's owner
+            registered, as a Time Sensitive notification ("Probe 1 reached 203 °F", body the cook's
+            name, in the device's unit; a late reading adds "40 minutes ago"), one thread per cook.
+            The reach is recorded as alerted on the cook (`targetsAlerted`, never returned) only
+            once every phone answered finally: accepted, or a dead token (410, BadDeviceToken),
+            which is deleted. No answer from Apple throws, so the host retries; any other refusal
+            is sent again with the next batch. A stopped cook sends nothing. Histogram
+            meatgeek.alert.accept_lag_ms: from the reach to Apple accepting the alert (aim: under
+            30 s).
           '''
         }
         rollup = component 'rollupTemperatures' {
@@ -381,6 +396,7 @@ model {
         }
         users = collection 'users' {
           technology 'partition /id'
+          description 'One profile per user, id = the caller. #244: one more document per user, id `push-tokens:<userId>`, holding the phones its alerts go to (at most 10).'
         }
         recipes = collection 'recipes' {
           technology 'partition /userId'
@@ -625,7 +641,15 @@ model {
     cloud.ingest.eventhub -[event]-> cloud.api.targets 'Event Hub trigger' {
       technology 'consumer group api-targets, identity-based'
     }
-    cloud.api.targets -> cloud.api.repos 'device owner; the tagged cook: read, If-Match replace'
+    cloud.api.targets -> cloud.api.repos "device owner; the tagged cook: read, If-Match replace; the owner's phones"
+    cloud.api.targets -> apns "an alert per reach, to each of the owner's phones" {
+      technology 'HTTP/2, apns-push-type alert, interruption-level time-sensitive'
+      description 'Through the same client and provider-token cache as GET /health/apns (#244). A 410 or BadDeviceToken answer deletes the token.'
+    }
+    apns -[decided]-> mobile 'Time Sensitive target alert' {
+      #decided
+      description 'Delivery to the iPhone needs the app to register its token with POST /users/me/push-tokens, which is later iOS work (spec #237). Proven on dev without a phone: a made-up token is deleted when Apple answers its alert BadDeviceToken.'
+    }
     cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
       technology 'WebSockets, @microsoft/signalr'
     }
@@ -677,7 +701,7 @@ model {
     cloud.api.ownership -> cloud.data.devices 'point read'
     cloud.api.repos -> cloud.data.devices 'list by userId, claim (create), update, release (delete)'
     cloud.api.repos -> cloud.data.cooks 'read, write; caller partition'
-    cloud.api.repos -> cloud.data.users 'point read, write; id = caller'
+    cloud.api.repos -> cloud.data.users 'point read, write; id = caller, or push-tokens:<caller>'
     cloud.api.repos -> cloud.data.recipes 'read, write; caller partition'
     cloud.api.repos -> cloud.data.temperatures 'read only; partition = deviceId' {
       description 'Current: newest reading by iothub-enqueuedtime. History: one page per request by continuation token (maxItemCount = limit, at most 1000), with no COUNT and no OFFSET (HAR-75).'

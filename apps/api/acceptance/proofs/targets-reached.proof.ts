@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 import type { Cook, CookListResponse, StartCookRequest } from '@meatgeekv2/api-interfaces';
 
@@ -16,7 +16,8 @@ import {
 /**
  * The target rule on dev: a running cook records which channels have reached
  * their target, and when (recordTargetsReached in apps/api, on its own
- * consumer group of the temperature-data event hub).
+ * consumer group of the temperature-data event hub), and (#244) sends an alert
+ * for each reach to every phone the owner registered.
  *
  * simdevice's synthetic readings never put the grill below 221 °F and start
  * probe 1 at 150 °F. The cook's targets are under both, so the target is
@@ -25,17 +26,51 @@ import {
  *
  *   1. the simulated device is registered to the owner;
  *   2. any cook active on it is stopped, so the device lock is free;
- *   3. `POST /cooks` with targets grill 200 and probe 1 140 is 201, and the
+ *   3. #244: `POST /users/me/push-tokens` registers a made-up phone token
+ *      ({@link MADE_UP_PHONE_TOKEN}), and `GET` lists it by its id;
+ *   4. `POST /cooks` with targets grill 200 and probe 1 140 is 201, and the
  *      cook has reached nothing yet;
- *   4. `simdevice --twin --count 2 --interval 2s`: the device applies the cook
+ *   5. `simdevice --twin --count 2 --interval 2s`: the device applies the cook
  *      and sends two readings tagged with it;
- *   5. `GET /cooks/{cookId}` is polled until the grill and probe 1 are reached,
+ *   6. `GET /cooks/{cookId}` is polled until the grill and probe 1 are reached,
  *      each at the second reading's timestamp. Probe 2 has no target and is
  *      not. `METRIC targets-reached-ms`: simdevice's exit to the reach being
  *      readable;
- *   6. `POST /cooks/{cookId}/stop` is 200 and the stopped cook keeps them;
- *   7. always, whatever failed before: no cook is left active on the device.
+ *   7. #244: `GET /users/me/push-tokens` is polled until the made-up token is
+ *      gone. The API sent the reach's alert to it through Apple's sandbox, and
+ *      only Apple answering "bad device token" deletes a token, so its going
+ *      shows the alert path works end to end: the Key Vault signing, the
+ *      provider token, and the push to Apple. `METRIC alert-token-gone-ms`:
+ *      the reach being readable to the token being gone;
+ *   8. `POST /cooks/{cookId}/stop` is 200 and the stopped cook keeps them;
+ *   9. always, whatever failed before: no cook is left active on the device,
+ *      and the made-up token is removed if it is still there.
  */
+
+/** Not a phone: 64 hex characters, the shape Apple expects, that no phone
+ *  owns. Apple's sandbox answers it `400 BadDeviceToken` (as GET /health/apns
+ *  relies on), which is what makes the API delete it. */
+export const MADE_UP_PHONE_TOKEN = '0'.repeat(64);
+
+/** The token's id as the API names it: its SHA-256 in hex. */
+export const MADE_UP_PHONE_TOKEN_ID = createHash('sha256').update(MADE_UP_PHONE_TOKEN).digest('hex');
+
+/** Poll pacing for step 7, on the injected clock. */
+export const TOKEN_GONE_POLL: { readonly intervalMs: number; readonly capMs: number } = {
+  intervalMs: 2_000,
+  capMs: 60_000,
+};
+
+interface PushTokenList {
+  items: Array<{ id: string; registeredAt: string }>;
+}
+
+async function phoneIds(api: AcceptanceApi): Promise<{ ids: string[]; response: AcceptanceResponse<PushTokenList> }> {
+  const response = await api.request<PushTokenList>({ method: 'GET', path: '/users/me/push-tokens' });
+  api.expectStatus(response, 200);
+  api.check(response, Array.isArray(response.body?.items), 'body.items is not an array');
+  return { ids: response.body.items.map(t => t.id), response };
+}
 
 /** Poll pacing for step 5, on the injected clock (../lib/clock). */
 export const TARGETS_POLL: { readonly intervalMs: number; readonly capMs: number } = {
@@ -109,6 +144,8 @@ function reachedAtSecondReading(
 
 export default defineProofs('targets reached', () => {
   let registered = false;
+  let phoneRegistered = false;
+  let reachedReadableAt: number | undefined;
   let cookId: string | undefined;
   let second: SentReading | undefined;
   let sentAt: number | undefined;
@@ -138,6 +175,33 @@ export default defineProofs('targets reached', () => {
         for (const cook of await activeCooks(api)) {
           await stopCook(api, cook.id);
         }
+      },
+    },
+    {
+      name: 'POST /users/me/push-tokens registers a made-up phone token, and GET lists it by its id',
+      async run(api: AcceptanceApi) {
+        const response = await api.request<{ id: string; registeredAt: string }>({
+          method: 'POST',
+          path: '/users/me/push-tokens',
+          body: { token: MADE_UP_PHONE_TOKEN },
+        });
+        api.check(
+          response,
+          response.status === 201 || response.status === 200,
+          `expected 201 or 200, got ${response.status}`
+        );
+        api.check(
+          response,
+          response.body?.id === MADE_UP_PHONE_TOKEN_ID,
+          `the token's id is ${show(response.body?.id)}, not its SHA-256`
+        );
+        phoneRegistered = true;
+        const listed = await phoneIds(api);
+        api.check(
+          listed.response,
+          listed.ids.includes(MADE_UP_PHONE_TOKEN_ID),
+          'the registered token is not listed'
+        );
       },
     },
     {
@@ -207,7 +271,8 @@ export default defineProofs('targets reached', () => {
           last = response;
           if (reachedAtSecondReading(api, response, second)) {
             reached = response.body.targetsReached;
-            api.metric('targets-reached-ms', clock().now() - sentAt);
+            reachedReadableAt = clock().now();
+            api.metric('targets-reached-ms', reachedReadableAt - sentAt);
             return;
           }
           if (clock().now() + TARGETS_POLL.intervalMs > deadline) {
@@ -220,6 +285,31 @@ export default defineProofs('targets reached', () => {
             `cap; last targetsReached ${show(last.body?.targetsReached)}`,
           last
         );
+      },
+    },
+    {
+      name: 'GET /users/me/push-tokens no longer lists the made-up token: Apple answered the alert BadDeviceToken',
+      async run(api: AcceptanceApi) {
+        if (!phoneRegistered || reachedReadableAt === undefined) {
+          throw new Error('no phone was registered, or the targets were not reached, in an earlier proof');
+        }
+        const deadline = clock().now() + TOKEN_GONE_POLL.capMs;
+        for (;;) {
+          const { ids, response } = await phoneIds(api);
+          if (!ids.includes(MADE_UP_PHONE_TOKEN_ID)) {
+            api.metric('alert-token-gone-ms', clock().now() - reachedReadableAt);
+            return;
+          }
+          if (clock().now() + TOKEN_GONE_POLL.intervalMs > deadline) {
+            throw new ProofFailure(
+              `the made-up token was still registered ${TOKEN_GONE_POLL.capMs / 1000} s after the ` +
+                'targets were reached: the alert did not reach Apple, or Apple did not answer ' +
+                'BadDeviceToken',
+              response
+            );
+          }
+          await clock().sleep(TOKEN_GONE_POLL.intervalMs);
+        }
       },
     },
     {
@@ -244,15 +334,22 @@ export default defineProofs('targets reached', () => {
       },
     },
     {
-      name: 'no cook is left active on the simulated device',
+      name: 'no cook is left active on the simulated device, and no made-up token is registered',
       // Runs whatever failed before it, so a failed run still frees the device.
       always: true,
       async run(api: AcceptanceApi) {
-        if (!registered) {
-          return;
+        if (registered) {
+          for (const cook of await activeCooks(api)) {
+            await stopCook(api, cook.id);
+          }
         }
-        for (const cook of await activeCooks(api)) {
-          await stopCook(api, cook.id);
+        if (phoneRegistered) {
+          const response = await api.request({
+            method: 'DELETE',
+            path: `/users/me/push-tokens/${MADE_UP_PHONE_TOKEN_ID}`,
+            route: '/users/me/push-tokens/{tokenId}',
+          });
+          api.expectStatus(response, 204);
         }
       },
     },

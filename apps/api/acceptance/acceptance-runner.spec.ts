@@ -39,7 +39,7 @@
  * call itself (a pass-through spy); `readClaimCode` runs fake claim-code
  * scripts, and its 30 s kill fires only on the fake clock.
  */
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { EventEmitter, once } from 'events';
 import {
   chmodSync,
@@ -80,7 +80,12 @@ import devicesGroup, { CLOCK_SKEW_MS } from './proofs/devices.proof';
 import releaseGroup, { RELEASE_WAIT } from './proofs/device-release.proof';
 import revokeGroup, { REVOKED_SEND_KILL_MS } from './proofs/device-revoke.proof';
 import twinGroup, { TWIN_POLL } from './proofs/device-twin.proof';
-import targetsGroup, { TARGETS, TARGETS_POLL } from './proofs/targets-reached.proof';
+import targetsGroup, {
+  MADE_UP_PHONE_TOKEN_ID,
+  TARGETS,
+  TARGETS_POLL,
+  TOKEN_GONE_POLL,
+} from './proofs/targets-reached.proof';
 import isolationGroup, { ISOLATION_WAIT } from './proofs/signalr-isolation.proof';
 import liveGroup, { LIVE_WAIT } from './proofs/signalr-live-temperature.proof';
 import roundtripGroup, { ROUNDTRIP_POLL } from './proofs/telemetry-roundtrip.proof';
@@ -374,6 +379,10 @@ interface StubOptions {
    *  under the simulated readings are reached at the second reading. `never`:
    *  nothing is recorded; `first-reading`: recorded at the first reading. */
   readonly targetsFault?: 'never' | 'first-reading';
+  /** #244: the alert of a reach. Default: Apple answers the made-up phone
+   *  token BadDeviceToken and the API deletes it. `kept`: the token is never
+   *  deleted (the alert never reached Apple). */
+  readonly alertFault?: 'kept';
   /** HAR-77: answer this route without the X-Request-ID header. */
   readonly omitRequestIdOn?: StubRoute;
   /** HAR-77: rewrite the body of this route's 2xx answer. */
@@ -480,6 +489,8 @@ interface Stub {
   readonly cookPushes: Array<{ target: string; cookId: string; connections: number }>;
   /** HAR-67: the simulated device's cooks. */
   readonly simCooks: () => Array<{ id: string; status: string }>;
+  /** #244: the ids of the owner's registered phones. */
+  readonly phoneIds: () => string[];
   /** HAR-75: the volume after each poll of the simulated device's current
    *  reading while a top-up is being routed. */
   readonly drainTotals: number[];
@@ -580,6 +591,8 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
 async function startStub(options: StubOptions = {}): Promise<Stub> {
   const cooks: StubCook[] = [];
   const devices = new Map<string, StubDevice>();
+  /** #244: the owner's registered phones, token id → registeredAt. */
+  const phones = new Map<string, string>();
   for (const id of options.devicesAtStart ?? []) {
     devices.set(id, {
       id,
@@ -1132,6 +1145,11 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
               tagged.targetsReached = { ...tagged.targetsReached, [channel]: { reachedAt } };
             }
           }
+          // #244: the reach's alert goes to Apple, which answers the made-up
+          // token BadDeviceToken, and the API deletes it.
+          if (tagged.targetsReached && options.alertFault !== 'kept') {
+            phones.delete(MADE_UP_PHONE_TOKEN_ID);
+          }
         }
         response.writeHead(200, { 'Content-Type': 'application/json' });
         response.end(
@@ -1250,6 +1268,35 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
       else if (request.method === 'DELETE' && recipeMatch) route = 'DELETE /recipes/{id}';
       else if (request.method === 'POST' && url.pathname === '/api/negotiate')
         route = 'POST /negotiate';
+      // #244: the owner's phones. Not StubRoutes: only the targets-reached
+      // group sends them. Each answers with a request charge, as the API does.
+      const phoneMatch = /^\/api\/users\/me\/push-tokens\/([^/]+)$/.exec(url.pathname);
+      if (url.pathname === '/api/users/me/push-tokens' || phoneMatch) {
+        const reply = (status: number, body?: unknown) => {
+          response.writeHead(status, {
+            'Content-Type': 'application/json',
+            'X-Request-ID': responseRequestId,
+            [REQUEST_CHARGE_HEADER]: '1.5',
+          });
+          response.end(body === undefined ? undefined : JSON.stringify(body));
+        };
+        if (request.method === 'POST' && !phoneMatch) {
+          const { token } = (await readJson(request)) as { token: string };
+          const id = createHash('sha256').update(token.toLowerCase()).digest('hex');
+          const created = !phones.has(id);
+          const registeredAt = new Date(fakeClock.now()).toISOString();
+          phones.set(id, registeredAt);
+          reply(created ? 201 : 200, { id, registeredAt });
+        } else if (request.method === 'GET' && !phoneMatch) {
+          reply(200, { items: [...phones].map(([id, registeredAt]) => ({ id, registeredAt })) });
+        } else if (request.method === 'DELETE' && phoneMatch) {
+          phones.delete(phoneMatch[1]);
+          reply(204);
+        } else {
+          send(404, errorBody('NOT_FOUND'));
+        }
+        return;
+      }
       // #243: GET /health/apns answers healthy, with no request charge (it
       // reads no Cosmos). It is not a StubRoute: no proof counts it.
       if (request.method === 'GET' && url.pathname === '/api/health/apns') {
@@ -1765,6 +1812,7 @@ async function startStub(options: StubOptions = {}): Promise<Stub> {
     topups,
     livePushes,
     cookPushes,
+    phoneIds: () => [...phones.keys()],
     simCooks: () =>
       cooks.filter(c => c.deviceId === SIM_DEVICE).map(({ id, status }) => ({ id, status })),
     drainTotals,
@@ -4344,11 +4392,13 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
   const STEPS = [
     'POST /devices/claim claims the simulated device for the owner',
     'any cook already active on the simulated device is stopped',
+    'POST /users/me/push-tokens registers a made-up phone token, and GET lists it by its id',
     'POST /cooks with targets below the simulated readings starts a cook that has reached nothing: 201',
     'simdevice --twin --count 2 applies the cook and sends two readings tagged with it',
     'GET /cooks/{cookId} shows the grill and probe 1 reached at the second reading, probe 2 not',
+    'GET /users/me/push-tokens no longer lists the made-up token: Apple answered the alert BadDeviceToken',
     'POST /cooks/{cookId}/stop stops the cook: 200, and it keeps its reached targets',
-    'no cook is left active on the simulated device',
+    'no cook is left active on the simulated device, and no made-up token is registered',
   ];
   const CLEANUP = STEPS[STEPS.length - 1];
   const runTargets = (options: StubOptions = {}, mode: FakeMode = 'ok') =>
@@ -4365,6 +4415,7 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
     );
     expect(result.lines).toContain(`PASS ${GROUP} ${CLEANUP}`);
     expect(stub!.simCooks().every(c => c.status === 'completed')).toBe(true);
+    expect(stub!.phoneIds()).toEqual([]);
   };
 
   it('targets sit under the simulated readings, so the cook starts with them already met', () => {
@@ -4382,6 +4433,18 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
     expect(result.lines.filter(line => line.startsWith('METRIC targets-reached-ms '))).toHaveLength(
       1
     );
+    expect(result.lines.filter(line => line.startsWith('METRIC alert-token-gone-ms '))).toHaveLength(
+      1
+    );
+    // #244: the token went in a POST body only; GET and DELETE name its id.
+    const phoneRequests = stub!.requests.filter(r => r.path.startsWith('/api/users/me/push-tokens'));
+    expect(phoneRequests.map(r => `${r.method} ${r.path}`)).toEqual([
+      'POST /api/users/me/push-tokens',
+      'GET /api/users/me/push-tokens',
+      'GET /api/users/me/push-tokens',
+      `DELETE /api/users/me/push-tokens/${MADE_UP_PHONE_TOKEN_ID}`,
+    ]);
+    expect(stub!.phoneIds()).toEqual([]);
     expect(stub!.twinRuns).toEqual([
       ['--twin', '--count', '2', '--interval', '2s', '--timeout', '60s'],
     ]);
@@ -4395,7 +4458,7 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
 
     expectFailedAt(
       result,
-      4,
+      5,
       'the grill and probe 1 were not both reached within the 90 s cap; last targetsReached absent'
     );
     const polls = stub!.requests.filter(
@@ -4412,7 +4475,7 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
 
     expectFailedAt(
       result,
-      4,
+      5,
       `grill was reached at "${TWIN_TIMESTAMP}", not at the second reading's timestamp ` +
         TWIN_SECOND_TIMESTAMP
     );
@@ -4421,7 +4484,22 @@ describe('targets reached (against the stub and a fake simdevice)', () => {
   it('(c) fails with the exit code when simdevice exits 1, and still stops the cook', async () => {
     const result = await runTargets({}, 'exit1');
 
-    expectFailedAt(result, 3, 'simdevice exited 1, expected 0');
+    expectFailedAt(result, 4, 'simdevice exited 1, expected 0');
+  });
+
+  it('(b) #244: fails naming the 60 s cap when the made-up token is never deleted, and still removes it', async () => {
+    const result = await runTargets({ alertFault: 'kept' });
+
+    expectFailedAt(
+      result,
+      6,
+      'the made-up token was still registered 60 s after the targets were reached'
+    );
+    expect(fakeClock.slept).toEqual(
+      Array.from({ length: TOKEN_GONE_POLL.capMs / TOKEN_GONE_POLL.intervalMs }, () =>
+        TOKEN_GONE_POLL.intervalMs
+      )
+    );
   });
 });
 
