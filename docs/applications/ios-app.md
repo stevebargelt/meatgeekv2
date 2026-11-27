@@ -73,7 +73,8 @@ flow is the same for both apps.
 Alerts (#245): the app asks for notification permission the first time a
 running cook's screen shows, never at launch; once granted it registers the
 phone's APNs token with the API, again whenever it changes, and removes it at
-sign-out. A declined permission shows "Alerts are off" on a running cook's
+sign-out, then unregisters from APNs so the phone gets no more of that
+account's alerts even when the delete failed (#278). A declined permission shows "Alerts are off" on a running cook's
 screen with a link to Settings. Alerts show with banner and sound while the
 app is open, and a tap opens the cook. The app has the Push Notifications and
 Time Sensitive Notifications capabilities (`Config/MeatGeek.entitlements`);

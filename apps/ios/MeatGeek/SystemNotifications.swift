@@ -40,6 +40,10 @@ final class SystemNotifications: NSObject, NotificationsPort {
         UIApplication.shared.registerForRemoteNotifications()
     }
 
+    func unregisterForRemoteNotifications() {
+        UIApplication.shared.unregisterForRemoteNotifications()
+    }
+
     func onDeviceToken(_ handler: @escaping @MainActor (Data) -> Void) {
         tokenHandler = handler
     }

@@ -17,6 +17,7 @@ final class FakeNotifications: NotificationsPort {
     var answer: NotificationPermission
     private(set) var requestCount = 0
     private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
     private var tokenHandler: (@MainActor (Data) -> Void)?
     private var tapHandler: (@MainActor (String) -> Void)?
 
@@ -34,6 +35,8 @@ final class FakeNotifications: NotificationsPort {
     }
 
     func registerForRemoteNotifications() { registerCount += 1 }
+
+    func unregisterForRemoteNotifications() { unregisterCount += 1 }
 
     func onDeviceToken(_ handler: @escaping @MainActor (Data) -> Void) { tokenHandler = handler }
 
@@ -382,6 +385,75 @@ struct NotificationSignOutTests {
         #expect(model.registeredToken == nil)
         #expect(session.state == SessionModel.State.signedOut(message: nil))
         #expect(await provider.signOutCount == 1)
+    }
+
+    @Test("signing out deletes the token, then unregisters from APNs; signing in again registers again")
+    func signOutUnregisters() async {
+        let port = FakeNotifications(.granted)
+        let registered = Recorder<String>()
+        let deleted = Recorder<String>()
+        var api = N.api(registered: registered, deleted: deleted)
+        api.deletePushTokenHandler = { input in
+            // The delete comes first: APNs is still registered while it runs.
+            let unregistered = await MainActor.run { port.unregisterCount }
+            deleted.record(unregistered == 0 ? input.path.tokenId : "after-unregister")
+            return .noContent(.init())
+        }
+        let (session, _, model) = await N.model(api, port: port)
+        model.refresh()
+        port.deliver(token: N.token)
+        await model.settled()
+
+        await session.signOut()
+        #expect(deleted.all == [N.tokenID])
+        #expect(port.unregisterCount == 1)
+
+        await session.signIn()
+        model.refresh()
+        await model.settled()
+        #expect(port.registerCount == 2)
+        port.deliver(token: N.otherToken)
+        await model.settled()
+        #expect(registered.all == [N.tokenHex, NotificationsModel.hex(N.otherToken)])
+        #expect(model.registeredToken == NotificationsModel.hex(N.otherToken))
+    }
+
+    @Test("signing out unregisters from APNs even when the delete fails")
+    func signOutUnregistersWhenDeleteFails() async {
+        let port = FakeNotifications(.granted)
+        let api = N.api(registered: Recorder(), deleted: Recorder(), delete: { _ in
+            .internalServerError(.init(body: .json(CookFixtures.error(.internalServerError, "boom"))))
+        })
+        let (session, _, model) = await N.model(api, port: port)
+        model.refresh()
+        port.deliver(token: N.token)
+        await model.settled()
+        await session.signOut()
+        #expect(port.unregisterCount == 1)
+        #expect(session.state == SessionModel.State.signedOut(message: nil))
+    }
+
+    @Test("each launch asks APNs for the token and sends it, never a stored one")
+    func everyLaunchRegisters() async {
+        let (defaults, done) = N.defaults()
+        defer { done() }
+        let registered = Recorder<String>()
+        let api = N.api(registered: registered, deleted: Recorder())
+        let firstPort = FakeNotifications(.granted)
+        let (_, _, first) = await N.model(api, port: firstPort, defaults: defaults)
+        first.refresh()
+        firstPort.deliver(token: N.token)
+        await first.settled()
+
+        let nextPort = FakeNotifications(.granted)
+        let (_, _, next) = await N.model(api, port: nextPort, defaults: defaults)
+        next.refresh()
+        await next.settled()
+        #expect(nextPort.registerCount == 1)
+        #expect(registered.all == [N.tokenHex])
+        nextPort.deliver(token: N.token)
+        await next.settled()
+        #expect(registered.all == [N.tokenHex, N.tokenHex])
     }
 
     @Test("signing out still signs out when the removal fails")

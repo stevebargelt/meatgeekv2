@@ -675,12 +675,14 @@ The app asks for permission, registers the phone and presents the alerts
   screen. Never at launch. iOS shows its prompt once per install; after that
   the model only reads the answer.
 - **Registering**: once permission is granted, the app asks APNs for the
-  token and sends it to `POST /users/me/push-tokens` as lowercase hex. It
+  token and sends it to `POST /users/me/push-tokens` as lowercase hex. Each
+  launch asks APNs for the token and sends what iOS hands over; the app never
+  sends a stored token. It
   reads the permission again at sign-in and every time the app comes to the
   foreground (it can change in Settings), and asks APNs for the token then.
   It POSTs once per sign-in (also after a 401 ended the last one) and again
   whenever the token changes. The last token it registered is kept in
-  `UserDefaults`, so the token it replaces is removed with
+  `UserDefaults` only to delete it, so the token it replaces is removed with
   `DELETE /users/me/push-tokens/{tokenId}` even when it changed between
   launches. A failed registration is
   tried again on the next foreground or cook screen. The app knows a phone at
@@ -697,6 +699,13 @@ The app asks for permission, registers the phone and presents the alerts
   run after any step already queued, and nothing registers again until the
   next sign-in. A failed delete does not stop the sign-out, and is not tried
   again: the signed-out phone can no longer call the API as that user.
+  Instead, after the deletes (whatever they answered), the model calls
+  `unregisterForRemoteNotifications()` through the port, as Apple advises at
+  log-out: Apple then answers the old token `410 Unregistered`, and the API
+  deletes it at the next alert. The signed-out phone gets none of that
+  account's alerts. The next sign-in asks APNs for a token and registers
+  again. If another account signs in on the phone and registers the same
+  token, the API moves the token to that account (#278).
 - **Presenting**: `SystemNotifications` is the notification center's
   delegate from launch, so an alert that arrives while the app is open shows
   its banner and plays its sound on any screen, the cook's own included
@@ -714,7 +723,8 @@ running cook's screen and not on an ended one, declined and the alerts-off
 state, permission turned on in Settings, registering, the same token not
 registered twice, a changed token, a failed registration retried, a 401,
 a token from before sign-in, the token id, sign-out (with and without a
-failed delete), a tap, the payload, and UI test mode's stub.
+failed delete, unregistering from APNs and registering again at the next
+sign-in), a token sent on every launch, a tap, the payload, and UI test mode's stub.
 `testDeclinedAlertsSayOffOnTheCookScreen` and `testTappedAlertOpensItsCook`
 (MeatGeekUITests) drive the screens on `StubNotifications`. No automated test
 shows delivery or the real adapter: the simulator on a GitHub-hosted runner

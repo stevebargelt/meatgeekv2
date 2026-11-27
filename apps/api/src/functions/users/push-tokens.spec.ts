@@ -201,6 +201,81 @@ describe('POST /users/me/push-tokens', () => {
     expect(JSON.stringify(response)).not.toMatch(/documents\.azure\.com/);
   });
 
+  it('takes over a token another user holds: only the newest account keeps that phone', async () => {
+    const w = new World();
+    await w.register(TOKEN, OTHER_OID);
+    await w.register(OTHER_TOKEN, OTHER_OID);
+    w.now = new Date('2026-11-28T10:00:00.000Z');
+
+    const response = await w.register(TOKEN);
+
+    expect(response.status).toBe(201);
+    expect((await w.list()).jsonBody).toEqual({
+      items: [{ id: pushTokenId(TOKEN), registeredAt: '2026-11-28T10:00:00.000Z' }],
+    });
+    expect((await w.list(OTHER_OID)).jsonBody).toEqual({
+      items: [{ id: pushTokenId(OTHER_TOKEN), registeredAt: '2026-11-27T10:00:00.000Z' }],
+    });
+    const other = await w.repository.listTokens(`${TID}:${OTHER_OID}`);
+    expect(other.tokens.map(t => t.token)).toEqual([OTHER_TOKEN]);
+  });
+
+  it('a token taken over can be taken back', async () => {
+    const w = new World();
+    await w.register(TOKEN, OTHER_OID);
+    await w.register(TOKEN);
+
+    const response = await w.register(TOKEN, OTHER_OID);
+
+    expect(response.status).toBe(201);
+    expect(((await w.list()).jsonBody as { items: unknown[] }).items).toHaveLength(0);
+    expect(((await w.list(OTHER_OID)).jsonBody as { items: unknown[] }).items).toHaveLength(1);
+  });
+
+  it('a takeover that failed to reach the other user finishes when the phone registers again', async () => {
+    const w = new World();
+    await w.register(TOKEN, OTHER_OID);
+    let failed = false;
+    w.container.beforeReplace = id => {
+      if (!failed && id === `push-tokens:${TID}:${OTHER_OID}`) {
+        failed = true;
+        w.container.failNext('replace', 503);
+      }
+    };
+
+    expect((await w.register(TOKEN)).status).toBe(500);
+    const retried = await w.register(TOKEN);
+
+    expect(retried.status).toBe(200);
+    expect(((await w.list(OTHER_OID)).jsonBody as { items: unknown[] }).items).toHaveLength(0);
+    expect(w.container.stored(`push-token-owner:${pushTokenId(TOKEN)}`)).toMatchObject({
+      userId: USER_ID,
+    });
+  });
+
+  it('forgets who held a token the caller drops for an eleventh phone', async () => {
+    const w = new World();
+    const tokens = Array.from({ length: MAX_PUSH_TOKENS_PER_USER + 1 }, (_, i) =>
+      i.toString(16).padStart(2, '0').repeat(32)
+    );
+    for (const [i, token] of tokens.entries()) {
+      w.now = new Date(Date.UTC(2026, 10, 27, 10, i));
+      await w.register(token);
+    }
+    expect(w.container.stored(`push-token-owner:${pushTokenId(tokens[0])}`)).toBeUndefined();
+    expect(w.container.stored(`push-token-owner:${pushTokenId(tokens[1])}`)).toMatchObject({
+      userId: USER_ID,
+    });
+  });
+
+  it('records who holds a token by its id, never the token', async () => {
+    const w = new World();
+    await w.register(TOKEN);
+    const owner = w.container.stored(`push-token-owner:${pushTokenId(TOKEN)}`);
+    expect(owner).toMatchObject({ userId: USER_ID });
+    expect(JSON.stringify(owner)).not.toContain(TOKEN);
+  });
+
   it('retries a write another phone made in between', async () => {
     const w = new World();
     await w.register(TOKEN);
@@ -261,6 +336,16 @@ describe('DELETE /users/me/push-tokens/{tokenId}', () => {
 
     expect(response.status).toBe(204);
     expect(((await w.list(OTHER_OID)).jsonBody as { items: unknown[] }).items).toHaveLength(1);
+    expect(w.container.stored(`push-token-owner:${pushTokenId(TOKEN)}`)).toMatchObject({
+      userId: `${TID}:${OTHER_OID}`,
+    });
+  });
+
+  it('forgets who held the phone once its holder removes it', async () => {
+    const w = new World();
+    await w.register(TOKEN);
+    await w.remove(pushTokenId(TOKEN));
+    expect(w.container.stored(`push-token-owner:${pushTokenId(TOKEN)}`)).toBeUndefined();
   });
 
   it('refuses an id that is not a SHA-256 in hex, such as the token itself', async () => {
