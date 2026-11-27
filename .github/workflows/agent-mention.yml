@@ -64,6 +64,9 @@ jobs:
           restrict_untrusted_prs: "false"
           plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
           plugins: mattpocock-skills@claude-plugins-official
+          # Same model and effort as the owner's interactive sessions; the action defaults to Sonnet.
+          settings: '{"effortLevel": "medium"}'
           claude_args: |
-            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
+            --model claude-opus-5-5
+            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,WebFetch,Bash"
             --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
