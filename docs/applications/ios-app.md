@@ -6,7 +6,9 @@ generated from the OpenAPI contract, and manages devices (list with each
 device's connection, claim with the code the device shows, rename, release)
 and cooks (list with filters and paging, start from a device, open, stop). An
 active cook's screen shows its readings live over SignalR, and every cook's
-screen draws the whole cook as one chart. It is the iOS counterpart of the
+screen draws the whole cook as one chart. With the pitmaster's permission it
+registers the phone for target alerts and presents them; tapping one opens
+the cook. It is the iOS counterpart of the
 [web app](web-app.md), which is the reference for how each screen behaves; the
 two share only the OpenAPI contract in `libs/api-specs/spec`.
 
@@ -29,7 +31,7 @@ Screen state is `@Observable`, `@MainActor` models.
 
 | Target                | Kind                                      | What it holds                                                                                                                                         |
 | --------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MeatGeek`            | iOS app (`com.meatgeek.ios`)              | The views (`DevicesView`, `CooksView`, `LivePanelView`, `CookChartView`, sign-in) and `AppComposition`. The chart uses Apple's Swift Charts           |
+| `MeatGeek`            | iOS app (`com.meatgeek.ios`)              | The views (`DevicesView`, `CooksView`, `LivePanelView`, `CookChartView`, sign-in), `AppComposition` and `SystemNotifications` (the notifications port's real adapter). The chart uses Apple's Swift Charts |
 | `MeatGeekKit`         | Swift package library                     | `AppConfig`, `SessionModel`, `APIClientFactory`, the screen models, `LiveConnection`, `ChartSeries`, and the in-process stub API used in UI test mode |
 | `MeatGeekAPI`         | Swift package target                      | The API client, generated on every build by the `swift-openapi-generator` build plugin from the committed bundle `openapi.yaml`                       |
 | `MeatGeekMSAL`        | Swift package library                     | `MSALTokenProvider`: the only code that links MSAL for iOS (2.18.1). The app links it; of the tests, only `MeatGeekMSALTests` uses it                 |
@@ -52,6 +54,7 @@ The screens, and the models behind them:
 | Cooks tab   | `CooksModel`, `StartCookModel`, `CookDetailModel`       | `GET /cooks`, `POST /cooks`, `GET /cooks/{cookId}`, `POST /cooks/{cookId}/stop`, `PUT /cooks/{cookId}/targets`                     |
 | Live panel  | `LiveConnection`, `LivePanelModel`                      | `POST /negotiate`, the SignalR hub, `GET /temperatures/current/{deviceId}` (backfill)                 |
 | Cook chart  | `CookChartModel`, `ChartSeries`                         | `GET /cooks/{cookId}/chart`, plus the readings the live panel receives                                |
+| Alerts      | `NotificationsModel`, `NotificationsPort`               | `POST /users/me/push-tokens`, `DELETE /users/me/push-tokens/{tokenId}`                                |
 
 Every call goes through `SessionModel.perform`, so a 401 from any route ends
 the session ("Your session ended. Sign in again."). The live panel negotiates,
@@ -66,6 +69,17 @@ the [`system`](https://stevebargelt.github.io/meatgeekv2/#/view/system/) and
 [`cloud`](https://stevebargelt.github.io/meatgeekv2/#/view/cloud/) views; the
 [`watchCook`](https://stevebargelt.github.io/meatgeekv2/#/view/watchCook/)
 flow is the same for both apps.
+
+Alerts (#245): the app asks for notification permission the first time a
+running cook's screen shows, never at launch; once granted it registers the
+phone's APNs token with the API, again whenever it changes, and removes it at
+sign-out. A declined permission shows "Alerts are off" on a running cook's
+screen with a link to Settings. Alerts show with banner and sound while the
+app is open, and a tap opens the cook. The app has the Push Notifications and
+Time Sensitive Notifications capabilities (`Config/MeatGeek.entitlements`);
+the simulator build still needs no signing identity. How it is built and
+tested, and the steps for checking alerts on a real iPhone, are in
+[the developer guide](../../apps/ios/README.md#alerts).
 
 ## Config and auth
 
@@ -96,7 +110,8 @@ There is one configuration, dev; Debug and Release both use it.
   `msauthv2`/`msauthv3` query schemes, which MSAL needs only for the broker
   (HAR-171). Tokens live only in
   MSAL's keychain cache, under the app's own keychain group, so a device build
-  needs no keychain entitlement. Every API call gets its token from
+  needs no keychain entitlement (its only entitlements are the two push
+  capabilities). Every API call gets its token from
   `acquireTokenSilent`, and `BearerTokenMiddleware` adds
   `Authorization: Bearer <token>`.
 - **Easy Auth.** The dev API accepts the app's tokens because its client id is

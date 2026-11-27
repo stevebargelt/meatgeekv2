@@ -48,6 +48,9 @@ public final class CooksModel {
     @ObservationIgnored public let now: @Sendable () -> Date
     /// What an active cook's live panel connects with; nil: no live panel.
     @ObservationIgnored public let live: LiveServices?
+    /// Alerts on this phone: a running cook's screen asks for permission and
+    /// says when alerts are off. Nil: no alerts (some tests).
+    @ObservationIgnored public let notifications: NotificationsModel?
     @ObservationIgnored private var started = false
     /// Bumped on every reload, so a page that arrives for an old filter is
     /// dropped instead of shown or appended.
@@ -65,6 +68,7 @@ public final class CooksModel {
         devices: DevicesModel,
         now: @escaping @Sendable () -> Date = { Date() },
         live: LiveServices? = nil,
+        notifications: NotificationsModel? = nil,
         activities: (any LiveActivities)? = nil,
         activityLive: LiveServices? = nil
     ) {
@@ -72,6 +76,7 @@ public final class CooksModel {
         self.devices = devices
         self.now = now
         self.live = live
+        self.notifications = notifications
         self.activities = activities.map { port in
             CookActivityTracker(session: devices.session, activities: port, live: activityLive) { [weak devices] deviceID in
                 devices?.device(id: deviceID)?.configuration?.temperatureUnit ?? .fahrenheit

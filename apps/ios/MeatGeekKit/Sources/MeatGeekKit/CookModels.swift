@@ -393,7 +393,8 @@ public final class CookDetailModel {
 
     /// Shows `cook`, and keeps the live panel in step: one for an active
     /// cook, given the cook's targets and reached state each time it is
-    /// read, and none once it has ended.
+    /// read, and none once it has ended. An active cook is the moment to ask
+    /// for notification permission (`NotificationsModel.runningCookShown()`).
     private func show(_ cook: Cook) {
         shown += 1
         state = .loaded(cook)
@@ -406,6 +407,9 @@ public final class CookDetailModel {
         }
         chart?.cookStatus(cook.status)
         if cook.status == .active {
+            // The first time a running cook shows (also right after starting
+            // one, which opens its screen): ask for alerts.
+            cooks.notifications?.runningCookShown()
             if let live {
                 live.cookChanged(cook)
                 return
@@ -484,6 +488,10 @@ public final class CookDetailModel {
     }
 
     public var isActive: Bool { cook?.status == .active }
+
+    /// Notification permission was declined: a running cook's screen says
+    /// alerts are off and links to Settings.
+    public var alertsOff: Bool { cooks.notifications?.alertsOff ?? false }
 
     public func deviceName(for cook: Cook) -> String {
         cooks.deviceName(for: cook.deviceId)

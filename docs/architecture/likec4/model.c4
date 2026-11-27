@@ -556,8 +556,21 @@ model {
         description '`CookChartModel` and `ChartSeries`: GET /cooks/{cookId}/chart, one average line per channel with a min/max band, from the server-side rollups. Readings pushed to the live panel are appended to it (at most 2,000).'
       }
 
+      alerts = component 'alerts' {
+        technology 'UserNotifications (SystemNotifications), Push Notifications and Time Sensitive Notifications capabilities'
+        description '''
+          `NotificationsModel` over the notifications port (#245): asks for permission the first
+          time a running cook's screen shows, never at launch; once granted, registers the phone's
+          APNs token (POST /users/me/push-tokens), again when it changes, and removes it at
+          sign-out (DELETE /users/me/push-tokens/{tokenId}). Declined: a running cook's screen says
+          alerts are off and links to Settings. Alerts show with banner and sound while the app is
+          open; a tap opens the cook's screen.
+        '''
+      }
+
       livePanel -> chart 'pushed readings'
       cooks -> livePanel 'the cook device'
+      cooks -> alerts 'a running cook shown: ask once'
       cooks -> chart 'the cook'
     }
     web = webapp 'Web app' {
@@ -647,9 +660,8 @@ model {
       technology 'HTTP/2, apns-push-type alert, interruption-level time-sensitive'
       description 'Through the same client and provider-token cache as GET /health/apns (#244). A 410 or BadDeviceToken answer deletes the token.'
     }
-    apns -[decided]-> mobile 'Time Sensitive target alert' {
-      #decided
-      description 'Delivery to the iPhone needs the app to register its token with POST /users/me/push-tokens, which is later iOS work (spec #237). Proven on dev without a phone: a made-up token is deleted when Apple answers its alert BadDeviceToken.'
+    apns -> mobile.alerts 'Time Sensitive target alert' {
+      description "The app registers its token with POST /users/me/push-tokens (#245). Proven on dev without a phone: a made-up token is deleted when Apple answers its alert BadDeviceToken. Delivery to a phone is not proven yet: the owner's iPhone check (the steps in apps/ios/README.md) proves it."
     }
     cloud.realtime -> web.livePanel 'temperature, cook_stopped' {
       technology 'WebSockets, @microsoft/signalr'
@@ -772,6 +784,7 @@ model {
     }
     mobile.livePanel -> cloud.api.temperatures 'GET /temperatures/current/{deviceId} (backfill)'
     mobile.chart -> cloud.api.cooks 'GET /cooks/{cookId}/chart'
+    mobile.alerts -> cloud.api.users 'POST /users/me/push-tokens; DELETE /users/me/push-tokens/{tokenId}'
   }
 
   delivery = system 'Delivery pipeline' {

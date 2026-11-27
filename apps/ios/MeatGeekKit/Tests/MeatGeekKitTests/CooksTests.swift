@@ -133,6 +133,13 @@ final class Box<Value: Sendable>: @unchecked Sendable {
     var value: Value {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
+        // Holds the lock for the whole read-modify-write, so `box.value += 1`
+        // from handlers running at once loses no update.
+        _modify {
+            lock.lock()
+            defer { lock.unlock() }
+            yield &stored
+        }
     }
 }
 

@@ -233,7 +233,6 @@ private struct ConfigurationSection: View {
                 LabeledContent("High temperature alert", value: "\(alerts.highTempThreshold.formatted()) °F")
                 LabeledContent("Low temperature alert", value: "\(alerts.lowTempThreshold.formatted()) °F")
                 LabeledContent("Alert sounds", value: alerts.enableSounds ? "On" : "Off")
-                LabeledContent("Push notifications", value: alerts.enablePushNotifications ? "On" : "Off")
             }
         }
     }

@@ -174,6 +174,8 @@ jobs:
             Nothing blocks it: every issue it was blocked by is closed as completed. Read AGENTS.md first and follow it.
             Run every sub-agent, task and command in the foreground and wait for it: this session ends the
             moment you stop, and anything still running in the background is killed with it.
+            Your GitHub access (gh, git push) expires about 60 minutes after this run starts. Push your work and
+            update the pull request by minute 50 at the latest; anything still unfinished then goes under "Left undone".
 
             1. Read the issue with `gh issue view ${{ needs.gate.outputs.issue }} --comments`.
             2. Implement what it asks ("What done looks like", when it has one), test-first where it has

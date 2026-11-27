@@ -6,6 +6,8 @@ import SwiftUI
 
 @main
 struct MeatGeekApp: App {
+    /// The APNs token and the notification center's delegate (SystemNotifications.swift).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var root = RootModel(
         appVersion: AppVersion(infoDictionary: Bundle.main.infoDictionary)
     )
@@ -18,6 +20,7 @@ struct MeatGeekApp: App {
         WindowGroup {
             RootView(
                 root: root, session: app.session, now: app.now, live: app.live,
+                notifications: app.notifications,
                 activities: app.activities, activityLive: app.activityLive, openCook: $openCook
             )
                 // A tapped lock-screen activity's link opens its cook.
@@ -37,19 +40,21 @@ struct MeatGeekApp: App {
     }
 }
 
-/// The session, the clock, the live services and the lock-screen activities
-/// the app runs on.
+/// The session, the clock, the live services, alerts and the lock-screen
+/// activities the app runs on.
 struct AppServices {
     let session: SessionModel
     let now: @Sendable () -> Date
     let live: LiveServices
+    let notifications: NotificationsModel
     let activities: any LiveActivities
     /// What the activities follow readings with; nil in UI test mode.
     let activityLive: LiveServices?
 }
 
 /// Builds the app's session from its Info.plist config, with the real clock
-/// the SignalR hub and ActivityKit, or everything from the fakes in UI test mode
+/// the SignalR hub, the system's notifications and ActivityKit, or everything
+/// from the fakes in UI test mode
 /// (`MEATGEEK_UI_TEST=1`, see `UITestMode`).
 enum AppComposition {
     @MainActor
@@ -60,14 +65,17 @@ enum AppComposition {
         if UITestMode.isEnabled(environment) {
             let app = UITestMode.makeApp(environment: environment)
             return AppServices(
-                session: app.session, now: app.now, live: app.live, activities: app.activities, activityLive: nil
+                session: app.session, now: app.now, live: app.live, notifications: app.notifications,
+                activities: app.activities, activityLive: nil
             )
         }
+        let session = makeSession(bundle: bundle)
         let live = LiveServices(createHub: SignalRLiveHub.factory)
         return AppServices(
-            session: makeSession(bundle: bundle),
+            session: session,
             now: { Date() },
             live: live,
+            notifications: NotificationsModel(port: SystemNotifications.shared, session: session, defaults: .standard),
             activities: ActivityKitLiveActivities(),
             activityLive: live
         )
