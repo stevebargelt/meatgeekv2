@@ -35,6 +35,7 @@ apps/ios/
 │   ├── Release.xcconfig
 │   ├── Dev.xcconfig          # Sign-in and API settings, see Sign-in below
 │   ├── MeatGeek-Info.plist   # Info.plist keys build settings cannot generate
+│   ├── MeatGeek.entitlements # Push Notifications and Time Sensitive Notifications, see Alerts
 │   └── Signing.local.xcconfig.example
 ├── MeatGeek/                 # App target: a thin SwiftUI shell
 ├── MeatGeekUITests/          # UI tests (XCTest/XCUITest)
@@ -58,8 +59,8 @@ apps/ios/
   `RootModel` (name and version), `SessionModel` (sign-in), `ProfileModel`
   (the account menu's name), the devices models (see [Devices](#devices)),
   the cooks models (see [Cooks](#cooks)), `LivePanelModel` (see
-  [Live temperatures](#live-temperatures)) and `CookChartModel` (see
-  [Cook chart](#cook-chart)).
+  [Live temperatures](#live-temperatures)), `CookChartModel` (see
+  [Cook chart](#cook-chart)) and `NotificationsModel` (see [Alerts](#alerts)).
 - **Adding a file needs no project edit.** `MeatGeek/`, `MeatGeekUITests/`,
   `MeatGeekMSALTests/` and `MeatGeekLiveUITests/` are synchronized folders:
   drop a Swift file (or an asset) into the folder and it is part of the target. `project.pbxproj` only changes when you add a
@@ -333,9 +334,10 @@ MSAL's default cache is in the keychain group `com.microsoft.adalcache`, which
 needs a keychain-sharing entitlement. The app sets MSAL's
 `keychainSharingGroup` to its own bundle id instead. Every app may use its own
 application-identifier group (`<team id>.com.meatgeek.ios`) without any
-entitlement, so **a device build needs no keychain entitlement and no
-`.entitlements` file**: only signing with your team (below). Add the Keychain
-Sharing capability only if another app should share the sign-in.
+entitlement, so **a device build needs no keychain entitlement**: only signing
+with your team (below). Its only entitlements are the two push capabilities
+(see [Alerts](#alerts)). Add the Keychain Sharing capability only if another
+app should share the sign-in.
 
 The simulator needs no team either: Xcode signs every simulator build "to
 run locally", which gives the app its keychain group. CI builds and tests that
@@ -390,6 +392,13 @@ The cook routes are served by `StubCooks`, an actor over the same devices:
   `StubLive` pushed for its device, in one-minute buckets up to the end of
   the minute it ended in (the stub's clock stands still, so a cook can end in
   the instant of its last reading).
+
+The push-token routes are served by `StubPushTokens`, one launch's phones in
+memory. Notifications run on `StubNotifications` (see [Alerts](#alerts)):
+`MEATGEEK_UI_TEST_NOTIFICATIONS=granted` or `denied` sets the permission
+(otherwise it is not asked yet, and the prompt is answered Allow), and
+`MEATGEEK_UI_TEST_TAPPED_ALERT=<cook id>` launches as if from a tap on that
+cook's alert.
 
 `StubAPI` has one handler per operation, `<operationId>Handler`; an unset one
 throws `StubAPI.NotStubbed`. To give a new screen data in UI test mode, set
@@ -560,6 +569,124 @@ new target on the live panel; `testCookStoppedEndsTheLiveCook` drives
 does (409 on an ended cook, a changed target loses its reached mark).
 The stub runs no target rule, so no reached mark shows in UI test mode; the
 marks are unit tested.
+
+## Alerts
+
+When a channel of a running cook reaches its target, the API sends a Time
+Sensitive alert to every phone the cook's owner has registered (#244, see
+[the path to Apple](../../docs/infrastructure/apns-key-vault.md#the-path-to-apple)).
+The app asks for permission, registers the phone and presents the alerts
+(#245).
+
+- **Capabilities**: `Config/MeatGeek.entitlements` (the `MeatGeek` target's
+  `CODE_SIGN_ENTITLEMENTS`) has `aps-environment` = `development` (Push
+  Notifications, the APNs sandbox the dev API sends to) and
+  `com.apple.developer.usernotifications.time-sensitive` (Time Sensitive
+  Notifications, so an alert breaks through Focus). A simulator build is
+  signed to run locally with these, with no team, as before. A device build
+  needs a team in the paid Apple Developer Program; automatic signing adds
+  both capabilities to the `com.meatgeek.ios` App ID.
+- **Port** (`NotificationsPort`, MeatGeekKit): the permission as it is, the
+  permission request, asking APNs for the device token and the tokens iOS
+  hands back, and the cook id of a tapped alert. The app's is
+  `SystemNotifications` (`MeatGeek/SystemNotifications.swift`), a thin
+  adapter over `UNUserNotificationCenter` and `UIApplication`, with the
+  `AppDelegate` that receives the token. UI test mode's is
+  `StubNotifications`; unit tests use `FakeNotifications`. As with
+  `LiveHub`, nothing decides anything in the adapters.
+- **When it asks** (`NotificationsModel`): the first time a running cook's
+  screen shows: opening a running cook, or starting one, which opens its
+  screen. Never at launch. iOS shows its prompt once per install; after that
+  the model only reads the answer.
+- **Registering**: once permission is granted, the app asks APNs for the
+  token and sends it to `POST /users/me/push-tokens` as lowercase hex. It
+  reads the permission again at sign-in and every time the app comes to the
+  foreground (it can change in Settings), and asks APNs for the token then,
+  so a changed token is registered again; the token it replaces is removed
+  with `DELETE /users/me/push-tokens/{tokenId}`. A failed registration is
+  tried again on the next foreground or cook screen. The app knows a phone at
+  the API by its id, the SHA-256 of the token's hex
+  (`NotificationsModel.tokenID`), as the API does. No token is logged.
+- **Declined**: a running cook's screen says "Alerts are off. Turn on
+  notifications for MeatGeek in Settings to be alerted when a target is
+  reached." with **Open Settings**, which opens the app's page in Settings.
+  The live panel works as before.
+- **Sign-out**: `SessionModel.signOut()` first runs `beforeSignOut`, where the
+  model deletes this phone's token while the session can still call the API,
+  then signs out. A failed delete does not stop the sign-out.
+- **Presenting**: `SystemNotifications` is the notification center's
+  delegate from launch, so an alert that arrives while the app is open shows
+  its banner and plays its sound on any screen, the cook's own included
+  (`[.banner, .list, .sound]`).
+- **Tapping**: the payload's top-level `cookId` (`AlertPayload`) opens that
+  cook's screen on the Cooks tab, live panel and all, from the background or
+  from a closed app (the launching tap is held until the screens are ready,
+  and until sign-in when the session is restoring).
+- **Device screen**: it no longer shows the device's "Push notifications"
+  setting, which nothing acts on.
+
+**Tests.** `NotificationsTests.swift` (MeatGeekKitTests) drives the model on
+`FakeNotifications` and `StubAPI`: not asking at sign-in, asking once on a
+running cook's screen and not on an ended one, declined and the alerts-off
+state, permission turned on in Settings, registering, the same token not
+registered twice, a changed token, a failed registration retried, a 401,
+a token from before sign-in, the token id, sign-out (with and without a
+failed delete), a tap, the payload, and UI test mode's stub.
+`testDeclinedAlertsSayOffOnTheCookScreen` and `testTappedAlertOpensItsCook`
+(MeatGeekUITests) drive the screens on `StubNotifications`. No automated test
+shows delivery or the real adapter: the simulator on a GitHub-hosted runner
+never gets a device token. That is checked on a real iPhone, below.
+
+### Checking alerts on a real iPhone
+
+Needs: an iPhone on iOS 18 or later with a cable or on the same network as
+the Mac; the Mac with Xcode 26; the Apple Developer Program team; the owner's
+steps in [the APNs key page](../../docs/infrastructure/apns-key-vault.md#the-owners-steps)
+done, so `GET /health/apns` on dev answers 200; a claimed device that is
+sending readings (a Raspberry Pi, or `simdevice`, see the
+[devices runbook](../../docs/devices/runbook.md)).
+
+1. **Build.** Set your team in `Config/Signing.local.xcconfig` (see
+   [Signing for a physical iPhone](#signing-for-a-physical-iphone)). Open
+   `apps/ios/MeatGeek.xcodeproj`, pick the **MeatGeek** scheme and your
+   iPhone, and Run (⌘R). On the first run, trust the developer on the phone
+   (Settings → General → VPN & Device Management) and run again. Check
+   Xcode's Signing & Capabilities tab lists Push Notifications and Time
+   Sensitive Notifications. A build from Xcode uses the APNs sandbox, which
+   is what dev sends to.
+2. **Sign in** with your Microsoft account. The app does not ask for
+   notifications yet.
+3. **Grant permission.** Open a running cook, or start one from the Devices
+   tab. Choose **Allow** at the prompt. Settings → MeatGeek → Notifications
+   now shows **Time Sensitive Notifications**; leave it on.
+4. **Close the app**: swipe it away in the app switcher, and lock the phone.
+5. **Start a cook on the web** (<https://meatgeekv2-web.vercel.app>) on the
+   same device, with a probe target (or the grill's) at or below that
+   channel's current reading. Within about 30 seconds (two readings, 5 s
+   apart, then Apple) the lock screen shows "Probe 1 reached 203 °F" (or
+   "Grill reached 225 °F"), with the cook's name, and the phone sounds.
+6. **Repeat with a Focus on.** Stop that cook on the web. Turn on a Focus
+   (Do Not Disturb) that does not allow MeatGeek but keeps Time Sensitive
+   notifications allowed (the Focus default), lock the phone, and start
+   another cook on the web with a target at or below the reading. The alert
+   still shows and sounds, marked Time Sensitive.
+7. **Tap the alert.** With the app closed, tap the alert from step 6 on the
+   lock screen: after Face ID the app opens on that cook's live screen. Do it
+   once more from the background: open the app, go to the home screen, stop
+   the cook and start another on the web with a target at or below the
+   reading, and tap its alert: the app opens on the new cook.
+8. **Open app.** On a running cook's screen, Edit targets: change a probe's
+   target to another value at or below its reading, Save, and go straight
+   back to the Cooks list. Within about 10 seconds the banner shows and the
+   sound plays. Do it again and stay on the cook's screen: the alert shows
+   there too.
+9. **Sign out** from the account menu, lock the phone, and start a cook on the
+   web with a target at or below the reading: no alert arrives on this phone.
+
+If no alert arrives: check Settings → MeatGeek → Notifications is on, that
+the cook's target is at or below the reading on two readings in a row, the
+cook's reached marks in the app (the server records them whether or not
+Apple accepted the push), and the Function App's logs for the APNs answer.
 
 ## Cook chart
 

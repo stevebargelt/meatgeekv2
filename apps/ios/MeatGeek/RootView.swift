@@ -9,6 +9,8 @@ struct RootView: View {
     var now: @Sendable () -> Date = { Date() }
     /// What an active cook's live panel connects with.
     var live: LiveServices?
+    /// Alerts on this phone; nil in previews.
+    var notifications: NotificationsModel?
 
     var body: some View {
         switch session.state {
@@ -22,7 +24,7 @@ struct RootView: View {
             ProgressView("Signing in…")
                 .accessibilityIdentifier(AccessibilityID.signingIn)
         case .signedIn:
-            SignedInView(session: session, now: now, live: live)
+            SignedInView(session: session, now: now, live: live, notifications: notifications)
         }
     }
 }
@@ -89,6 +91,8 @@ enum AccessibilityID {
     static let cookDetailStop = "cookDetail.stop"
     static let cookDetailStopProblem = "cookDetail.stopProblem"
     static let cookDetailEditTargets = "cookDetail.editTargets"
+    static let cookDetailAlertsOff = "cookDetail.alertsOff"
+    static let cookDetailOpenSettings = "cookDetail.openSettings"
     static func editTarget(_ key: String) -> String { "editTargets.target.\(key)" }
     static let editTargetsSave = "editTargets.save"
     static let editTargetsProblem = "editTargets.problem"

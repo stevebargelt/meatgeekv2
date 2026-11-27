@@ -28,8 +28,8 @@ struct CooksView: View {
     let model: CooksModel
     let profile: ProfileModel
     let session: SessionModel
-
-    @State private var path: [Route] = []
+    /// The tab's navigation stack; a tapped alert sets it to its cook.
+    @Binding var path: [Route]
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -257,6 +257,10 @@ struct CookDetailView: View {
                 LivePanelView(model: live)
             }
 
+            if cook.status == .active, model.alertsOff {
+                AlertsOffSection()
+            }
+
             // Then the whole cook as a chart, active or ended.
             if let chart = model.chart {
                 CookChartSection(model: chart)
@@ -330,6 +334,23 @@ struct CookDetailView: View {
         }
         .disabled(model.stopState == .stopping)
         .accessibilityIdentifier(AccessibilityID.cookDetailStop)
+    }
+}
+
+/// Notification permission was declined: no alerts until it is turned on
+/// in the app's page in Settings.
+struct AlertsOffSection: View {
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        Section {
+            Label(NotificationsModel.alertsOffMessage, systemImage: "bell.slash")
+                .accessibilityIdentifier(AccessibilityID.cookDetailAlertsOff)
+            Button("Open Settings", systemImage: "gear") {
+                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+            }
+            .accessibilityIdentifier(AccessibilityID.cookDetailOpenSettings)
+        }
     }
 }
 

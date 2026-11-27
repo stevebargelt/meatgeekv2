@@ -33,10 +33,11 @@ public enum UITestMode {
     }
 
     /// What the app runs on in UI test mode: the session over the stub, the
-    /// stub's clock (which the screens read), and the live panel's stub hub.
+    /// stub's clock (which the screens read), the live panel's stub hub, and
+    /// alerts on `StubNotifications`.
     @MainActor
     public static func makeApp(environment: [String: String]) -> (
-        session: SessionModel, now: @Sendable () -> Date, live: LiveServices
+        session: SessionModel, now: @Sendable () -> Date, live: LiveServices, notifications: NotificationsModel
     ) {
         let clock = StubClock()
         let (api, live) = StubAPI.uiTestWithLive(clock: clock)
@@ -46,7 +47,8 @@ public enum UITestMode {
                 tokenProvider: FakeTokenProvider(signInAccount: SignedInAccount(displayName: accountName)),
                 api: api
             )
-        return (session, { clock.now }, live.services)
+        let notifications = NotificationsModel(port: StubNotifications(environment: environment), session: session)
+        return (session, { clock.now }, live.services, notifications)
     }
 
     /// The session the app uses in UI test mode: signed out at launch.
