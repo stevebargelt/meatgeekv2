@@ -168,7 +168,7 @@ jobs:
             --model claude-opus-5-5
             --permission-mode acceptEdits
             --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,WebFetch,Bash"
-            --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
+            --append-system-prompt "No one is watching this run. Run every sub-agent, task and command in the foreground and wait for it: the session ends the moment you stop, and anything left in the background is killed. Your GitHub access (gh, git push) expires about 60 minutes after the run starts, so push your work by minute 50 and say in your reply what is left. Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
           prompt: |
             You are working on issue #${{ needs.gate.outputs.issue }} in ${{ github.repository }}, with no one watching.
             Nothing blocks it: every issue it was blocked by is closed as completed. Read AGENTS.md first and follow it.
