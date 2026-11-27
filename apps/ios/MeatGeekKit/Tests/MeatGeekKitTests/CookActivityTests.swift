@@ -67,19 +67,18 @@ final class FakeLiveActivities: LiveActivities {
     func issueStartToken(_ token: Data) { startTokens.continuation.yield(token) }
 
     /// Each activity's update tokens: what `issuePushToken(_:for:)` yields.
-    private var pushTokenStreams: [String: (stream: AsyncStream<Data>, continuation: AsyncStream<Data>.Continuation)] = [:]
+    /// `finishPushTokens(for:)` ends the stream, as the system adapter does
+    /// for an activity it cannot list yet; the next read starts a new one.
+    private var pushTokenStreams: [String: AsyncStream<Data>.Continuation] = [:]
     private(set) var pushTokenReads: [String] = []
     func pushTokens(_ id: String) -> AsyncStream<Data> {
         pushTokenReads.append(id)
-        return pushTokenStream(id).stream
-    }
-    func issuePushToken(_ token: Data, for id: String) { pushTokenStream(id).continuation.yield(token) }
-    private func pushTokenStream(_ id: String) -> (stream: AsyncStream<Data>, continuation: AsyncStream<Data>.Continuation) {
-        if let existing = pushTokenStreams[id] { return existing }
         let made = AsyncStream<Data>.makeStream()
-        pushTokenStreams[id] = (made.stream, made.continuation)
-        return (made.stream, made.continuation)
+        pushTokenStreams[id] = made.continuation
+        return made.stream
     }
+    func issuePushToken(_ token: Data, for id: String) { pushTokenStreams[id]?.yield(token) }
+    func finishPushTokens(for id: String) { pushTokenStreams.removeValue(forKey: id)?.finish() }
 }
 
 // MARK: - Presenter

@@ -48,7 +48,7 @@ struct SignedInView: View {
             activities: activities, activityLive: activityLive
         ))
         #if DEBUG
-        _pushTokens = State(initialValue: activities.map { ActivityPushTokensModel(port: $0) })
+        _pushTokens = State(initialValue: activities.map { ActivityPushTokensModel(port: $0, now: now) })
         #endif
     }
 

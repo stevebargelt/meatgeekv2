@@ -108,10 +108,13 @@ background.)
 **T2. Start by push, app swiped away.** End T1's activity
 (`$PUSH end --token <token A>`), wait for it to leave, or long-press it away.
 Swipe the app away in the app switcher and lock the phone. Send the same
-start push. Record whether it appeared. Before opening the app, record
-whether the app had been woken: there is no direct sign of it, so open the
-Push tab and record whether the new activity already has an update token
-(token B) the moment it opens. If it has none, pull to refresh and record
+start push. Record whether it appeared. Then open the app on the Push tab and record whether the new activity
+already has an update token (token B), its **Received** time and the tab's
+**App active since** time. A Received time before App active since means the
+app got the token while it was away. A Received time at or after it does not
+show that the app was not woken (a swiped-away app may be launched in the
+background without the tab running), but it does not show that it was either:
+record it as "not shown". If it has none, pull to refresh and record
 whether one comes while the app is open. If none comes at all, repeat T2 with
 `--input-push-token` and record that.
 
@@ -125,15 +128,15 @@ $PUSH start --token <start token> --cook-id <cook id> --cook-name Brisket --aler
 
 Record: did "Cook ended" show, did the fresh activity appear, did its banner
 show silently. To update the fresh activity you need its token: open the app,
-record whether the Push tab already shows it, copy it (token C), return to the
+record whether the Push tab already shows it and its Received time against App active since, copy it (token C), return to the
 home screen, and send `$PUSH update --token <token C> --grill 230`. Record
 whether the lock screen took the update.
 
 **T4. End and start a fresh one, app swiped away.** As T3, with the app
 swiped away before the end and start pushes. To update the fresh one, open
 the app, copy its token (token D), swipe the app away again, then send the
-update. Record each step as in T3, and whether token D was there when the app
-opened.
+update. Record each step as in T3, and whether token D's Received time is before App active
+since.
 
 **T5. The token of an ended activity.** After T3 (or T4), send an update to
 the ended activity's token:
@@ -159,10 +162,10 @@ channel, and no per-activity token is needed).
 
 | Result | Meaning |
 |---|---|
-| T1 and T2 both start an activity, and both issue its update token without the app opened | A token per activity works for every closed state. It is the simpler choice (no channel to create or delete per cook, no broadcast capability), and the per-token answers tell the server when a phone has gone. |
-| T2 starts the activity but issues no update token until the app is opened (the acknowledged bug) | A token per activity cannot update a cook started on the web while the app is swiped away: the lock screen would stay at its first reading. Broadcast channels avoid it: the start push names the channel, and the server never needs the activity's token. Choose channels. |
+| T1 and T2 both start an activity, and both issue its update token without the app opened (Received before App active since) | A token per activity works for every closed state. It is the simpler choice (no channel to create or delete per cook, no broadcast capability), and the per-token answers tell the server when a phone has gone. |
+| T2 starts the activity, but its update token is not shown to arrive before the app is opened (the acknowledged bug, or "not shown") | A token per activity cannot update a cook started on the web while the app is swiped away: the lock screen would stay at its first reading. Broadcast channels avoid it: the start push names the channel, and the server never needs the activity's token. Choose channels. |
 | T2 does not start an activity at all | Neither choice helps a swiped-away app: a cook started on the web shows only after the app opens (#251's repair on open). Alerts are unaffected. Record it; the design stays, with that limit stated. |
-| T3 and T4 show a fresh activity that takes updates | The restart past 8 hours can be built: the server ends each activity before 8 hours and starts a fresh one. With a token per activity, the fresh activity's token must reach the API without the app opening (T3, T4: was token C or D there before the app opened); if not, the fresh activity can only be updated through a channel, so choose channels. |
+| T3 and T4 show a fresh activity that takes updates | The restart past 8 hours can be built: the server ends each activity before 8 hours and starts a fresh one. With a token per activity, the fresh activity's token must reach the API without the app opening (T3, T4: was token C or D received before App active since); if not, the fresh activity can only be updated through a channel, so choose channels. |
 | T3 or T4 shows no fresh activity, or one that never takes an update | The restart cannot be built in that state. #250 to #253 wait for the owner's decision ([#249](https://github.com/stevebargelt/meatgeekv2/issues/249)): an 8-hour limit is not shipped quietly. The lock screen then shows "Open MeatGeek to resume" when the activity ends. |
 | T5: `200` for an ended activity's token | APNs does not say an activity has ended: the server must forget the token itself when it ends the activity, and a token per activity cannot detect a phone-side dismissal from Apple's answers. That weighs towards channels. |
 | T5: `410 Unregistered` or `400 BadDeviceToken` | The server can delete a dead activity token on Apple's answer, as it already does for alert tokens. |

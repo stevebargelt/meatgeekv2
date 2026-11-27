@@ -34,6 +34,7 @@ export const DEFAULTS = {
   bundleId: 'com.meatgeek.ios',
   attributesType: 'CookActivityAttributes',
   unit: 'fahrenheit',
+  cookName: 'Test cook',
 };
 
 /// The ActivityKit content stale three minutes after it was sent, as the
@@ -61,7 +62,7 @@ Content:
   --cook-id <id>        start: the cook the activity is for. Use a running
                         cook's id: opening the app ends an activity whose cook
                         it cannot find.
-  --cook-name <name>    start: the cook's name (default "Test cook").
+  --cook-name <name>    start: the cook's name (default "${DEFAULTS.cookName}").
   --start-time <iso>    start: when the cook started (default: now).
   --grill <F> --probe1 <F> ... --probe4 <F>
                         Readings, degrees F.
@@ -145,6 +146,7 @@ export function parseArgs(argv, env = {}) {
   }
   if (!/^[0-9a-fA-F]+$/.test(options.token)) throw new UsageError('--token must be hex, as the Push tab shows it.');
   if (event === 'start' && !options.cookId) throw new UsageError('start needs --cook-id.');
+  options.cookName ??= DEFAULTS.cookName;
   options.unit ??= DEFAULTS.unit;
   if (!['fahrenheit', 'celsius'].includes(options.unit)) throw new UsageError('--unit must be fahrenheit or celsius.');
   options.priority = options.priority === undefined ? 10 : Number(options.priority);
@@ -176,11 +178,10 @@ export function payload(options, now) {
   const seconds = Math.floor(now.getTime() / 1000);
   const aps = { timestamp: seconds, event: options.event, 'content-state': contentState(options, now) };
   if (options.event === 'start') {
-    const cookName = options.cookName ?? 'Test cook';
     aps['attributes-type'] = options.attributesType;
     aps.attributes = {
       cookId: options.cookId,
-      cookName,
+      cookName: options.cookName,
       startTime: options.startTime ?? now.toISOString(),
     };
     if (options.inputPushToken) aps['input-push-token'] = 1;
@@ -190,7 +191,7 @@ export function payload(options, now) {
   } else {
     aps['stale-date'] = seconds + STALE_AFTER_SECONDS;
   }
-  const title = options.alertTitle ?? (options.event === 'start' ? `Cook started: ${options.cookName ?? 'Test cook'}` : undefined);
+  const title = options.alertTitle ?? (options.event === 'start' ? `Cook started: ${options.cookName}` : undefined);
   if (title !== undefined || options.alertBody !== undefined || options.sound !== undefined) {
     const alert = {};
     if (title !== undefined) alert.title = title;

@@ -18,7 +18,8 @@ struct ActivityPushTokensTests {
     @Test("Shows the push-to-start token, and the latest when the system issues a new one")
     func startToken() async {
         let port = FakeLiveActivities()
-        let model = ActivityPushTokensModel(port: port)
+        let clock = SettableClock()
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
         #expect(model.startToken == nil)
         model.start()
         port.issueStartToken(Data([0xab, 0xcd]))
@@ -30,8 +31,9 @@ struct ActivityPushTokensTests {
     @Test("Lists each running activity with its cook, and its update token once issued")
     func activityTokens() async {
         let port = FakeLiveActivities()
+        let clock = SettableClock()
         port.shown = [.init(id: "a-1", cookID: "cook-1"), .init(id: "a-2", cookID: "cook-2")]
-        let model = ActivityPushTokensModel(port: port)
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
         model.start()
         #expect(model.activities.map(\.id) == ["a-1", "a-2"])
         #expect(model.activities.map(\.cookID) == ["cook-1", "cook-2"])
@@ -44,8 +46,9 @@ struct ActivityPushTokensTests {
     @Test("Refreshing picks up an activity started by push and drops an ended one, reading each token stream once")
     func refresh() async {
         let port = FakeLiveActivities()
+        let clock = SettableClock()
         port.shown = [.init(id: "a-1", cookID: "cook-1")]
-        let model = ActivityPushTokensModel(port: port)
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
         model.start()
         port.issuePushToken(Data([0x01]), for: "a-1")
         await until("a-1's token shows") { model.activities.first?.updateToken == "01" }
@@ -63,12 +66,52 @@ struct ActivityPushTokensTests {
         #expect(port.pushTokenReads == ["a-1", "a-2"])
     }
 
+    @Test("Records when each update token came, to compare with when the app became active")
+    func receivedAt() async {
+        let port = FakeLiveActivities()
+        let clock = SettableClock()
+        port.shown = [.init(id: "a-1", cookID: "cook-1")]
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
+        clock.set(fixedNow)
+        model.start()
+        #expect(model.activeSince == fixedNow)
+        #expect(model.activities.first?.updateTokenReceivedAt == nil)
+        clock.set(fixedNow.addingTimeInterval(5))
+        port.issuePushToken(Data([0x01]), for: "a-1")
+        await until("a-1's token shows") { model.activities.first?.updateToken == "01" }
+        #expect(model.activities.first?.updateTokenReceivedAt == fixedNow.addingTimeInterval(5))
+    }
+
+    @Test("A token stream that ends is followed again on the next refresh")
+    func endedStream() async {
+        let port = FakeLiveActivities()
+        let clock = SettableClock()
+        port.shown = [.init(id: "a-1", cookID: "cook-1")]
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
+        model.start()
+        port.finishPushTokens(for: "a-1")
+        await until("the ended stream lets go of a-1") { !model.followed.contains("a-1") }
+        model.refresh()
+        #expect(port.pushTokenReads == ["a-1", "a-1"])
+        port.issuePushToken(Data([0x07]), for: "a-1")
+        await until("a-1's token shows") { model.activities.first?.updateToken == "07" }
+    }
+
     @Test("Starting twice reads the start token stream once")
     func startOnce() {
         let port = FakeLiveActivities()
-        let model = ActivityPushTokensModel(port: port)
+        let clock = SettableClock()
+        let model = ActivityPushTokensModel(port: port, now: clock.now)
         model.start()
         model.start()
         #expect(port.startTokenReads == 1)
     }
+}
+
+/// A clock the test sets.
+final class SettableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = fixedNow
+    func set(_ date: Date) { lock.withLock { current = date } }
+    var now: @Sendable () -> Date { { self.lock.withLock { self.current } } }
 }

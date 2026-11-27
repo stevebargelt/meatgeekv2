@@ -680,7 +680,9 @@ For the trials of #249 (starting an activity by push, and ending it and
 starting a fresh one past the 8-hour limit), debug builds have a **Push** tab
 (`PushTokensView`, over `ActivityPushTokensModel` in MeatGeekKit): the token
 that starts an activity by push, and each running activity's cook and update
-token, with copy buttons. `#if DEBUG` keeps it out of a Release build.
+token, with copy buttons, and when each update token came compared with when
+the app became active. `#if DEBUG` keeps the tab and the view out of a Release
+build; the model and `TabID.pushTokens` are compiled in but unused there.
 [`scripts/live-activity-push.mjs`](scripts/live-activity-push.mjs) sends one
 start, update or end push from the owner's Mac with his own `.p8` key, to the
 APNs sandbox; a start push carries a banner with no sound. The steps, what to
@@ -690,7 +692,9 @@ record and what each result means:
 `ActivityPushTokensTests.swift` (MeatGeekKitTests) tests the tab's model over
 the fake port. `node --test apps/ios/scripts/test/live-activity-push.test.mjs`
 tests the script (payloads, headers, the provider token, what it prints and
-never prints) with a generated key and a recording sender. CI does not run it yet.
+never prints) with a generated key and a recording sender. The `ios` CI job
+does not run it yet; `test-repeat` runs it on a pull request that changes
+the script or its tests (suite `ios-live-activity-push`).
 
 ## Alerts
 

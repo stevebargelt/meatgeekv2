@@ -33,12 +33,23 @@ struct PushTokensView: View {
                                 token: activity.updateToken,
                                 missing: "No update token: only an activity started by push has one"
                             )
+                            if let received = activity.updateTokenReceivedAt {
+                                LabeledContent("Received", value: received.formatted(date: .omitted, time: .standard))
+                                    .font(.caption)
+                            }
                         }
                     }
                 } header: {
                     Text("Running activities: update or end by push")
                 } footer: {
                     Text("Send with: live-activity-push.mjs update|end --token <this>")
+                }
+                if let activeSince = model.activeSince {
+                    Section {
+                        LabeledContent("App active since", value: activeSince.formatted(date: .omitted, time: .standard))
+                    } footer: {
+                        Text("A token received before this came while the app was away.")
+                    }
                 }
             }
             .navigationTitle("Push tokens")
