@@ -102,7 +102,9 @@ jobs:
           done
           [[ -z "$open" ]] || skip "blocked by$open"
 
-          pr=$(gh pr list --repo "$REPO" --state open --search "\"Closes #$ISSUE\" in:body" --json number --jq '.[0].number // empty')
+          # Not --search: the search index lags new pull requests by seconds to minutes.
+          pr=$(gh pr list --repo "$REPO" --state open --limit 200 --json number,body \
+            --jq "[.[] | select(.body // \"\" | test(\"(?i)\\\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #$ISSUE\\\\b\"))][0].number // empty")
           [[ -z "$pr" ]] || skip "pull request #$pr already closes it"
           echo "#$ISSUE is ready" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "ready=true" >> "$GITHUB_OUTPUT"
@@ -140,12 +142,15 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The release job starts runs with the workflow token, so their actor is the
+          # github-actions bot; the action refuses bots it is not told to allow.
+          allowed_bots: "github-actions,github-actions[bot]"
           plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
           plugins: mattpocock-skills@claude-plugins-official
           claude_args: |
             --permission-mode acceptEdits
             --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,Bash(xcodebuild:*),Bash(xcrun:*),Bash(swift:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(go:*),Bash(gofmt:*),Bash(git:*),Bash(gh:*)"
-            --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"$RUNNER_TEMP/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
+            --append-system-prompt "Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
           prompt: |
             You are working on issue #${{ needs.gate.outputs.issue }} in ${{ github.repository }}, with no one watching.
             Nothing blocks it: every issue it was blocked by is closed as completed. Read AGENTS.md first and follow it.
@@ -176,7 +181,9 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          pr=$(gh pr list --repo "$REPO" --state open --search "\"Closes #$ISSUE\" in:body" --json url --jq '.[0].url // empty')
+          # Not --search: the search index lags the pull request the agent just opened.
+          pr=$(gh pr list --repo "$REPO" --state open --limit 200 --json url,body \
+            --jq "[.[] | select(.body // \"\" | test(\"(?i)\\\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #$ISSUE\\\\b\"))][0].url // empty")
           if [[ -n "$pr" ]]; then echo "#$ISSUE: $pr" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
           labels=$(gh api "repos/$REPO/issues/$ISSUE" --jq '[.labels[].name] | join(",")')
           if [[ ",$labels," != *",ready-for-agent,"* ]]; then echo "#$ISSUE: parked by the agent" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
