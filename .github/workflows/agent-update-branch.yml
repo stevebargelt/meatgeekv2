@@ -1,0 +1,146 @@
+name: Agent update branch
+
+# After anything merges to the default branch, find the agent's open pull requests
+# that no longer merge cleanly, and have an agent merge the default branch into each
+# one and resolve the conflicts. Tickets can't reliably predict which files they will
+# share, so collisions are fixed when they happen instead.
+#
+# A pull request that had already passed review goes back through it: the agent turns
+# auto-merge off and adds agent-review, so a fresh reviewer checks the resolution
+# before anything merges. "Run workflow" with a pull request number does one by hand.
+# Installed by the home repo's bin/install-agent-action; change the template there.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  find:
+    if: vars.AGENT_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.find.outputs.prs }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ONE: ${{ github.event.inputs.pr }}
+    steps:
+      - id: find
+        run: |
+          set -euo pipefail
+          if [[ -n "${ONE:-}" ]]; then
+            [[ "$ONE" =~ ^[0-9]+$ ]] || { echo "::error::pr must be a number"; exit 1; }
+            echo "prs=[$ONE]" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # GitHub computes mergeability lazily after a push; ask until it answers.
+          for _ in $(seq 1 12); do
+            list=$(gh pr list --repo "$REPO" --state open --author "app/claude" --limit 100 --json number,mergeable)
+            jq -e 'all(.mergeable != "UNKNOWN")' <<<"$list" >/dev/null && break
+            sleep 15
+          done
+          prs=$(jq -c '[.[] | select(.mergeable == "CONFLICTING") | .number]' <<<"$list")
+          echo "Conflicting agent pull requests: $prs" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+  resolve:
+    needs: find
+    if: needs.find.outputs.prs != '[]' && needs.find.outputs.prs != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.find.outputs.prs) }}
+    concurrency:
+      group: agent-update-branch-${{ matrix.pr }}
+      cancel-in-progress: false
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ matrix.pr }}
+    steps:
+      - id: pr
+        run: |
+          set -euo pipefail
+          gh pr view "$PR" --repo "$REPO" --json headRefName,isDraft,state \
+            --jq '"branch=\(.headRefName)\ndraft=\(.isDraft)\nstate=\(.state)"' >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_26.6.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: xcodebuild -resolvePackageDependencies -project apps/ios/MeatGeek.xcodeproj -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" -disablePackageRepositoryCache -skipPackagePluginValidation
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/data-pusher/go.mod
+          cache: false
+
+      - id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "claude,claude[bot],github-actions,github-actions[bot]"
+          restrict_untrusted_prs: "false"
+          plugin_marketplaces: https://github.com/anthropics/claude-plugins-official.git
+          plugins: mattpocock-skills@claude-plugins-official
+          settings: '{"effortLevel": "medium"}'
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "Read,Edit,Write,Glob,Grep,Task,Skill,TodoWrite,WebFetch,Bash"
+            --append-system-prompt "No one is watching this run. Run every sub-agent, task and command in the foreground and wait for it: the session ends the moment you stop, and anything left in the background is killed. Your GitHub access (gh, git push) expires about 60 minutes after the run starts, so push your work by minute 50 and say in your reply what is left. Swift packages are already resolved. Pass -clonedSourcePackagesDirPath \"${{ runner.temp }}/SourcePackages\" -disablePackageRepositoryCache -disableAutomaticPackageResolution -skipPackagePluginValidation to every xcodebuild call; do not re-resolve packages or change git config."
+
+          prompt: |
+            Pull request #${{ matrix.pr }} in ${{ github.repository }} no longer merges cleanly with
+            `${{ github.event.repository.default_branch }}`. This checkout is its branch. Read AGENTS.md first.
+
+            1. `git fetch origin` and merge `origin/${{ github.event.repository.default_branch }}` into this branch.
+            2. Resolve every conflict so both sides keep working: what the default branch gained, and what this
+               pull request adds (`gh pr view ${{ matrix.pr }}` says what that is). Never drop either side's change.
+            3. Run the checks AGENTS.md lists for CI and fix what fails. Commit the merge and push.
+            4. Comment on the pull request: which files conflicted and how you resolved each.
+            5. ${{ steps.pr.outputs.draft == 'false' && format('It had already passed review, so send it back: run `gh pr merge {0} --disable-auto` (ignore an error if auto-merge was off), then `gh pr edit {0} --add-label agent-review`.', matrix.pr) || 'It is still a draft; the review that is due will see the merge.' }}
+
+            If you cannot resolve it with the checks passing, push nothing and comment on the pull request with
+            what conflicts and why.
+
+      - name: Check the result
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            m=$(gh pr view "$PR" --repo "$REPO" --json mergeable --jq .mergeable)
+            [[ "$m" != UNKNOWN ]] && break; sleep 10
+          done
+          echo "#$PR mergeable: $m" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [[ "$m" == CONFLICTING ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "This pull request still conflicts with the default branch after the agent's attempt: $RUN_URL. Resolve it by hand, or run \"Agent update branch\" with this number again."
+          fi
