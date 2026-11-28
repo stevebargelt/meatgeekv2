@@ -559,7 +559,7 @@ customMetrics
 
 ## Live alerts: what each one means and what to do
 
-These are the alerts live in dev today. All of them are Terraform-managed in `apps/infrastructure/modules/monitoring/main.tf`. Every alert emails the action group `<prefix>-alerts` (in dev, `meatgeek-v2-dev-alerts`); the budgets email the same address (`admin_email`) directly. The conditions below are copied from `main.tf`.
+These are the alerts live in dev today. All of them except the subscription budget are Terraform-managed in `apps/infrastructure/modules/monitoring/main.tf`; the subscription budget is created by an operator script, see [Budgets](#budgets). Every alert emails the action group `<prefix>-alerts` (in dev, `meatgeek-v2-dev-alerts`), except the resource-group budget, which emails the same address (`admin_email`) directly. The conditions below are copied from `main.tf`.
 
 ### `cosmos-429-rate` (severity 2)
 
@@ -604,8 +604,24 @@ These are the alerts live in dev today. All of them are Terraform-managed in `ap
 
 ### Budgets
 
-- **Condition:** the resource-group budget `<prefix>-budget` (`budget_limit`), plus the subscription credit budget `<prefix>-credit-budget` (`secondary_budget_limit`) only when `manage_subscription_budget` is set. Each emails when monthly cost is > `80`% and > `100`% of its amount.
-- **Do:** Cost Management → Cost analysis, cost by resource.
+Two budgets, with different owners and scopes:
+
+| Budget | Scope | Owner | Amount | Notifies |
+|---|---|---|---|---|
+| `<prefix>-budget` (`meatgeek-v2-dev-budget`) | the dev resource group only | Terraform, `modules/monitoring/main.tf` | `budget_limit`, 50 in dev | `admin_email` directly, Actual > 80% and > 100% |
+| `meatgeek-v2-dev-credit-budget` | the whole subscription, other projects included | operator, `apps/infrastructure/scripts/subscription-spend-alert.sh ensure` | `MONTHLY_CREDIT` (default 200: the "$200 Azure credit" in `dev.tfvars`) | the action group `meatgeek-v2-dev-alerts`, Actual > 50%, > 80%, > 100% and Forecasted > 100% |
+
+The subscription budget is the one that sees the credit run out. The credit is shared by everything in the subscription, so the resource-group budget cannot. Terraform does not own it: `manage_subscription_budget = false`, because the CI apply identity is scoped to `meatgeek-v2-dev-rg`. Its notifications go only to the action group, whose email `ingestion-cap-reached` proved (HAR-179), so there is one delivery path. A budget triggering that action group is a different trigger from a scheduled-query alert; it counts as proven once the forced breach below has delivered and been recorded on #225's pull request. The action group emails `admin_email`; the email names the budget and the threshold.
+
+Cost data reaches budgets several hours late, and Azure evaluates them a few times a day, so an Actual alert can arrive after the spend that triggered it. That is why the 50% and Forecasted 100% thresholds exist: they arrive while there is still credit left.
+
+- **Set up or change:** run as a subscription Owner, after the dev stack is applied (the action group must exist):
+  `MONTHLY_CREDIT=<credit> bash apps/infrastructure/scripts/subscription-spend-alert.sh ensure`. It creates or updates the budget (adopting the one Terraform used to own, same name, and keeping an existing budget's start date, which Azure will not change), reads it back, and exits 1 if Azure stored anything else, an email recipient left on an adopted budget included. Rerun it when the credit changes. Find the monthly credit in the portal under Cost Management → Credits, or on the subscription's Overview page.
+- **Prove it fires:** `MONTHLY_CREDIT=1 bash apps/infrastructure/scripts/subscription-spend-alert.sh ensure` (any subscription that has spent more than 1 this month is over every threshold), wait for the email from the action group (it can take up to a day), record when it arrived, then rerun `ensure` with the real credit. To test the action group alone, without the budget, use Monitor → Alerts → Action groups → `meatgeek-v2-dev-alerts` → Test.
+- **Check the subscription is still enabled:** `bash apps/infrastructure/scripts/subscription-spend-alert.sh check-state`. It asks ARM now (`GET /subscriptions/<id>`); `az account show` prints the state cached at `az login`, which still says `Enabled` after Azure disables the subscription. Exit 0 means `Enabled`; exit 3 means anything else (`Disabled`, `Warned`, `PastDue`, `Deleted`), and it prints the state and the spending limit.
+- **Do, when the subscription budget fires:** Cost Management → Cost analysis at subscription scope, grouped by resource group, then by resource: the spend may be in another project's resource group. At 100%, or Forecasted 100%, the credit is about to run out; with a spending limit on, Azure disables the subscription when it does, and every API call then returns 403. Stop or delete what is spending, or remove the spending limit (the owner's decision: it moves the cost to the card on file).
+- **Do, when the subscription is disabled (`check-state` exits 3):** with a spending limit, it stays disabled until the credit resets at the start of the next billing period, unless the owner removes the limit (portal: Subscriptions → the subscription → Remove spending limit). After it is re-enabled, rerun `check-state`.
+- **Do, when the resource-group budget fires:** Cost Management → Cost analysis, cost by resource, in `meatgeek-v2-dev-rg`.
 
 ## Alerting Strategy
 
