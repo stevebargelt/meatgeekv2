@@ -84,6 +84,10 @@ _Avoid_: Item, piece, meat (for a single piece)
 The temperature the **Owner** has set the **Smoker** to. A **Cook** has one at a time, and it can change during the **Cook**. MeatGeek does not control the **Smoker**, so changing it is up to the **Owner**.
 _Avoid_: Grill target, setpoint, pit temp
 
+**Smoker Ready**:
+The moment a **Cook**'s **Smoker Probe** first enters its **Smoker Range**, sent to the **Owner** as a **Notification**. Changing the **Smoker Target** makes it pending again. The **Smoker** cannot be out of its **Smoker Range** before **Smoker Ready**, so warming up never raises an **Alarm**.
+_Avoid_: Up to temp, preheated, grill ready
+
 **Milestone**:
 A **Food Probe** temperature for one **Cut** that calls for an action, such as wrapping it, raising the **Smoker Target** or pulling it. A **Cut** has zero or more; reaching one prompts the **Owner**, who decides what to do.
 _Avoid_: Done temp, target temp, alarm
@@ -151,5 +155,5 @@ An **Alarm** for a **Device** that is not **Live** during an **Active** **Cook**
 _Avoid_: Device offline, disconnected, stale
 
 **Notification**:
-How a **Milestone** or an **Alarm** reaches a **User**, such as a push, a sound or an email. A **Watcher** can choose to get **Milestones** but never gets **Alarms**. **Milestones** respect quiet hours; **Alarms** do not.
+How a **Milestone** or an **Alarm** reaches a **User**, such as a push, a sound or an email. A **Watcher** can choose to get **Milestones** but never gets **Alarms**. The **Owner** gets every **Milestone** and **Alarm** of their **Cook**, even in quiet hours; quiet hours hold back only a **Watcher**'s **Milestones**.
 _Avoid_: Alert, message
