@@ -25,6 +25,27 @@ permissions:
   contents: read
 
 jobs:
+  # The Node scripts under apps/ios/scripts (the Live Activity test-push kit,
+  # #248) and their tests: Node built-ins only, so no install. On Linux, not
+  # the macOS runner, so it is done in seconds. Skips while there are none.
+  ios-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Test the iOS scripts
+        if: hashFiles('apps/ios/scripts/test/**/*.test.mjs') != ''
+        run: node --test 'apps/ios/scripts/test/**/*.test.mjs'
+
   # HAR-160 (goal HAR-157) — builds the iOS app (apps/ios, HAR-158) and runs
   # its shared `MeatGeek` scheme's tests in the simulator. No signing, no
   # secret, no OIDC, no environment, `contents: read` only, so it runs on fork
