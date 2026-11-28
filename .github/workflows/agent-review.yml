@@ -220,3 +220,26 @@ jobs:
             if grep -qE '\w' "$RUNNER_TEMP/owner-steps.md"; then echo; cat "$RUNNER_TEMP/owner-steps.md"; fi
           } > "$RUNNER_TEMP/hold.md"
           gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/hold.md"
+
+      # The transcript, encrypted to the owner's age key; bin/agent-logs in the home repo reads it.
+      - name: Save the transcript
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          KEY: ${{ vars.AGENT_LOG_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -f "$EXECUTION_FILE" ]] || { echo "no transcript"; exit 0; }
+          [[ -n "$KEY" ]] || { echo "::warning::AGENT_LOG_KEY is not set, so the transcript is not saved"; exit 0; }
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) p=linux-amd64 ;; Linux-ARM64) p=linux-arm64 ;; macOS-ARM64) p=darwin-arm64 ;; *) p=darwin-amd64 ;;
+          esac
+          curl -fsSL "https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-$p.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/age/age" -r "$KEY" -o "$RUNNER_TEMP/transcript.json.age" "$EXECUTION_FILE"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.claude.outputs.execution_file != ''
+        with:
+          name: agent-transcript-${{ github.event.pull_request.number }}-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/transcript.json.age
+          retention-days: 30
+          if-no-files-found: ignore
