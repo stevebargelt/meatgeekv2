@@ -56,7 +56,8 @@ EOF
 chmod +x "${FAKE_GH}"
 
 CI_RUNS_EP="repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1"
-APPLY_RUNS_EP="repos/${REPO}/actions/workflows/infra-apply-dev.yml/runs?status=completed&per_page=100"
+APPLY_RUNS_EP="repos/${REPO}/actions/workflows/infra-apply-dev.yml/runs?status=completed&per_page=100&page=1"
+APPLY_RUNS_EP2="repos/${REPO}/actions/workflows/infra-apply-dev.yml/runs?status=completed&per_page=100&page=2"
 
 answer() { # answer <case> <endpoint> ; body on stdin
   key="$(printf '%s' "$2" | tr -c 'A-Za-z0-9' '_')"
@@ -69,8 +70,8 @@ green() { # green <case> <sha> <updated_at>
     answer "$1" "${CI_RUNS_EP}"
 }
 
-apply_runs() { # apply_runs <case> <json array of {id,head_sha,conclusion}>
-  printf '{"workflow_runs":%s}' "$2" | answer "$1" "${APPLY_RUNS_EP}"
+apply_runs() { # apply_runs <case> <json array of {id,head_sha,conclusion}> [<endpoint>]
+  printf '{"workflow_runs":%s}' "$2" | answer "$1" "${3:-${APPLY_RUNS_EP}}"
 }
 
 jobs() { # jobs <case> <run id> <conclusion of the Terraform apply step>
@@ -126,6 +127,14 @@ green skipped-runs "$S1" "$GREEN_5H_AGO"
 apply_runs skipped-runs "[{\"id\":14,\"head_sha\":\"$S3\",\"conclusion\":\"skipped\"},{\"id\":11,\"head_sha\":\"$S1\",\"conclusion\":\"success\"}]"
 jobs skipped-runs 11 success
 
+# The last apply is on page 2: a red main with many pull requests pushes it off
+# page 1, whose runs all skipped. Still state 2, not "could not tell".
+green paged "$S2" "$GREEN_5H_AGO"
+apply_runs paged "[{\"id\":14,\"head_sha\":\"$S3\",\"conclusion\":\"skipped\"}]"
+apply_runs paged "[{\"id\":11,\"head_sha\":\"$S1\",\"conclusion\":\"success\"}]" "${APPLY_RUNS_EP2}"
+jobs paged 11 success
+compare paged "$S1" "$S2" ahead
+
 # Dev holds a recovery apply newer than the newest green SHA: no alert.
 green applied-ahead "$S1" "$GREEN_5H_AGO"
 apply_runs applied-ahead "[{\"id\":15,\"head_sha\":\"$S2\",\"conclusion\":\"success\"}]"
@@ -158,6 +167,7 @@ jobs bad-sha 11 success
 green none-applied "$S2" "$GREEN_5H_AGO"
 apply_runs none-applied "[{\"id\":13,\"head_sha\":\"$S2\",\"conclusion\":\"success\"}]"
 jobs none-applied 13 skipped
+apply_runs none-applied "[]" "${APPLY_RUNS_EP2}"
 
 # The jobs lookup of a candidate run fails.
 green jobs-api-error "$S2" "$GREEN_5H_AGO"
@@ -209,12 +219,13 @@ for shell in bash sh; do
   expect "${shell}" state2-in-grace 0 "pending"
   expect "${shell}" partial-apply 3 "MISSED RECONCILIATION"
   expect "${shell}" skipped-runs 0 "in sync"
+  expect "${shell}" paged 3 "MISSED RECONCILIATION"
   expect "${shell}" applied-ahead 0 "behind"
   expect "${shell}" diverged 3 "not in main's history"
   expect "${shell}" ci-api-error 1
   expect "${shell}" no-green 1
   expect "${shell}" bad-sha 1
-  expect "${shell}" none-applied 1
+  expect "${shell}" none-applied 1 "applied anything"
   expect "${shell}" jobs-api-error 1
   expect "${shell}" compare-api-error 1
   expect "${shell}" compare-unknown 1
@@ -230,7 +241,7 @@ for shell in bash sh; do
   if [ "${shell}" = bash ]; then BASH_CHECKS=$((BASH_CHECKS + 2)); else SH_CHECKS=$((SH_CHECKS + 2)); fi
 done
 
-FLOOR=19
+FLOOR=20
 echo "dev-apply-lag fixtures: ${PASS} passed, ${FAIL} failed (bash ${BASH_CHECKS}, sh ${SH_CHECKS})"
 [ "${BASH_CHECKS}" -eq "${SH_CHECKS}" ] || { echo "FAIL: per-shell check counts differ" >&2; exit 1; }
 [ "${BASH_CHECKS}" -ge "${FLOOR}" ] || { echo "FAIL: ran ${BASH_CHECKS} checks per shell, floor is ${FLOOR}" >&2; exit 1; }
