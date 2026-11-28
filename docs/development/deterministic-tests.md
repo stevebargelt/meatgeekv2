@@ -195,9 +195,10 @@ new live wait needs a new row.
   node tools/test-repeat/test-repeat.mjs run <suite> --runs 1 --parallel 8
   ```
 
-  On a pull request, `.github/workflows/test-repeat.yml` runs every suite whose
-  paths the change touches 50 times. The label `test-repeat:load` adds a pass
-  with 8 copies at once; `test-repeat:all` runs every suite 50 times. See
+  Each night, `.github/workflows/test-repeat.yml` runs every suite whose paths
+  changed on `main` since its last run 50 times, and every suite on Sundays; a
+  failing suite opens a `needs-triage` issue. Run it by hand with `all` (every
+  suite) or `load` (adds a pass with 8 copies at once). See
   [tools/test-repeat/README.md](../../tools/test-repeat/README.md).
 
 ## The guard

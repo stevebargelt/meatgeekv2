@@ -18,7 +18,7 @@ Cosmos emulator).
 | `terraform-tests.sh`                      | The `terraform-tests` suite: backend-less init once, then `terraform test` in every test-bearing module. |
 | `run-tests.mjs`                           | Runs the harness's own tests (`test/*.test.mjs`) with file and test-count floors.                        |
 | `test/env-scan.mjs`                       | The static scans behind the registry test's environment checks (see Environment).                        |
-| `../../.github/workflows/test-repeat.yml` | The pull-request workflow.                                                                               |
+| `../../.github/workflows/test-repeat.yml` | The nightly and weekly workflow on `main`.                                                               |
 
 ## Running a suite locally
 
@@ -140,10 +140,18 @@ Re-measure and adjust `shards` in `suites.mjs` if a job grows past 25 minutes.
 
 ## In CI: `.github/workflows/test-repeat.yml`
 
-On every pull request to `main` (opened, synchronize, reopened, labeled):
+On `main`, never on pull requests (it never gated a merge, and at 18 to 28
+minutes it was the longest wait on one):
 
-1. `select` runs the harness self-tests, then maps
-   `git diff --name-only <base>...HEAD` onto the registry's `paths` globs.
+- nightly (07:17 UTC, Monday to Saturday): the suites affected by what changed
+  since the last successful scheduled run, or every suite when there is none;
+- weekly (07:17 UTC, Sunday): every suite (the `test-repeat:all` selection);
+- by hand (`workflow_dispatch`): input `all` selects every suite, input `load`
+  adds the 8-copy pass (`test-repeat:load`).
+
+1. `select` runs the harness self-tests, finds the last successful scheduled
+   run's commit, then maps `git diff --name-only <that commit>...HEAD` onto the
+   registry's `paths` globs.
 2. One matrix job per selected suite (and shard) runs it with N = 50. The Cosmos
    emulator suite has its own job on `windows-2025`, with the same pinned
    emulator and start script (`.github/scripts/cosmos-emulator.ps1`) as
@@ -152,17 +160,20 @@ On every pull request to `main` (opened, synchronize, reopened, labeled):
    affected?, runs requested, runs passed, first failing run, duration — with a
    row for every suite (an unaffected one says "not affected"). It fails if any
    selected pass failed or reported nothing.
+4. `report`, only when `summary` failed, opens an issue labelled `needs-triage`
+   per failing suite (`test-repeat: <suite> failed on main`), or comments on
+   that suite's open one. Main stays green.
 
 What is selected:
 
-| Pull request                                   | Suites                                               | Runs       |
+| Changes since the last run                     | Suites                                               | Runs       |
 | ---------------------------------------------- | ---------------------------------------------------- | ---------- |
 | changes files a suite's `paths` match          | those suites                                         | 50         |
 | changes `tools/test-repeat/**` or the workflow | every suite                                          | 1          |
 |                                                | except `test-repeat-harness` (the harness's tests)   | 50         |
 |                                                | and except the suites whose `paths` it also changes  | 50         |
-| has label `test-repeat:all`                    | every suite                                          | 50         |
-| has label `test-repeat:load`                   | adds one pass per selected suite with `--parallel 8` | 1 per copy |
+| weekly, or `all` (`test-repeat:all`)           | every suite                                          | 50         |
+| `load` (`test-repeat:load`)                    | adds one pass per selected suite with `--parallel 8` | 1 per copy |
 
 A harness change runs every suite once, proving each command still works
 without putting suites that are not fixed yet through 50 runs. Two exceptions
@@ -174,8 +185,9 @@ fixes (HAR-121: a fix that
 needs a harness change, such as `playwright-web-e2e`'s port per copy, still
 gets its 50 runs).
 
-The workflow holds no secret, no environment and no OIDC permission, so it runs
-on fork pull requests.
+The workflow holds no secret, no environment and no OIDC permission:
+`contents: read`, plus `actions: read` in `select` and `issues: write` in
+`report`.
 
 ## Adding a suite
 
