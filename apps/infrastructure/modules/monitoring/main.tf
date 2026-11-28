@@ -394,7 +394,8 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_near_cap" {
 # unguarded made the whole configuration unappliable from CI. The boundary is
 # resolved in the GRAPH rather than by widening the identity — widening would break
 # the closed-escalation-path precondition the MG-23 threat model rests on.
-# Subscription-scoped spend control is an operator/bootstrap concern; the
+# Subscription-scoped spend control is an operator concern, owned by
+# scripts/subscription-spend-alert.sh (#225); the
 # RESOURCE-GROUP budget above is unaffected and remains the primary control.
 # See the root apps/infrastructure/variables.tf comment on manage_subscription_budget
 # (including the `terraform state rm` note for dev, which already applied it).

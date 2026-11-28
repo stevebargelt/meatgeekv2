@@ -85,6 +85,7 @@ const FIXTURE_RUNNERS = [
   'run-flex-secret-gate-fixtures.sh',
   'run-iothub-cosmos-partition-key-fixtures.sh',
   'run-live-host-storage-fixtures.sh',
+  'run-subscription-spend-alert-fixtures.sh',
 ];
 
 // HAR-119: Terraform's checkpoint call asks HashiCorp for the latest version

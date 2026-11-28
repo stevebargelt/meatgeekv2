@@ -219,7 +219,9 @@ admin_email            = "steve@bargelt.com" # Update with your email for alerts
 # the whole configuration unappliable from CI. Resolved in the graph, never by
 # widening the identity. The RG-scope budget above (budget_limit) is unaffected and
 # remains the primary spend control; the subscription-level credit warning becomes
-# a bootstrap/operator concern.
+# an operator concern, owned by scripts/subscription-spend-alert.sh (#225): it
+# creates this same budget name routed to the action group. See
+# docs/monitoring/observability.md, Budgets.
 #
 # ⚠️  dev APPLIED this resource under MG-24, so it IS in dev state: setting this
 # false plans a DESTROY. Before activating the MG-23 loop, drop it from state

@@ -1174,6 +1174,22 @@ fi
 #   → the app-deploy SP object id (== app_deploy_principal_object_id)
 ```
 
+### Step 6b — Subscription spend alert (operator, after the first apply; #225)
+
+The stack cannot create the subscription budget: the CI apply identity is scoped
+to `meatgeek-v2-dev-rg` (`manage_subscription_budget = false`). This script owns
+it instead. Run it as a subscription Owner once the dev action group
+`meatgeek-v2-dev-alerts` exists, and again whenever the monthly credit changes:
+
+```bash
+MONTHLY_CREDIT=<the subscription's monthly credit> \
+  bash apps/infrastructure/scripts/subscription-spend-alert.sh ensure
+bash apps/infrastructure/scripts/subscription-spend-alert.sh check-state   # live state, exit 0 = Enabled
+```
+
+What it creates, how to prove it fires, and what to do when it does:
+[observability, Budgets](../monitoring/observability.md#budgets).
+
 ### Step 6a — Publish the app, then run the authenticated smoke test (unblocks MG-21)
 
 The MG-21 dev integration proof has two parts, **both run manually by the operator
