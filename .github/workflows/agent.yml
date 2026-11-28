@@ -175,7 +175,7 @@ jobs:
             Run every sub-agent, task and command in the foreground and wait for it: this session ends the
             moment you stop, and anything still running in the background is killed with it.
             Your GitHub access (gh, git push) expires about 60 minutes after this run starts. Push your work and
-            update the pull request by minute 50 at the latest; anything still unfinished then goes under "Left undone".
+            update the pull request by minute 50 at the latest; anything still unfinished then goes in the body's "🙋 Owner" section.
 
             1. Read the issue with `gh issue view ${{ needs.gate.outputs.issue }} --comments`.
             2. Implement what it asks ("What done looks like", when it has one), test-first where it has
@@ -184,10 +184,24 @@ jobs:
                and listed in the pull request.
             3. Commit on your branch following AGENTS.md's commit conventions, referencing `#${{ needs.gate.outputs.issue }}`.
             4. Push, then `gh pr create --draft --base ${{ github.event.repository.default_branch }} --fill-first` with a
-               body that starts with `Closes #${{ needs.gate.outputs.issue }}` and ends with two sections:
-               "Left undone": only what merging needs first (a missing step, a secret, a workflow edit you may not
-               push), or "Nothing"; and "Check by hand later": proofs that can only happen after merging, such as
-               on a real phone or on dev, or "Nothing". A separate review agent reviews the draft next.
+               body laid out like this (a separate review agent reviews the draft next):
+
+               Closes #${{ needs.gate.outputs.issue }}
+
+               ## 🙋 Owner: do this before merging
+               Only what merging needs first: a missing step, a secret, a workflow edit you may not push, a fix
+               that needs the owner's account. Numbered steps, each saying exactly what to edit or run (the file
+               and the change, or the command) and how the owner can tell it worked. If there is none, this
+               section is the single line "Nothing, merges itself when green." Keep the steps one list with no
+               blank lines inside it.
+
+               ## Summary
+               <what changed and why>
+
+               ## Check by hand later
+               Proofs that can only happen after merging, such as on a real phone or on dev. Each item gives
+               the exact steps and what to look for, or links the doc section that has them; never just the
+               check's name. "Nothing" if none.
 
             If you cannot get the checks green, do not open a pull request. Instead comment
             on the issue with what you tried and where it stuck, and run
