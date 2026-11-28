@@ -62,9 +62,16 @@ describe('start', () => {
 
   it('shows a banner with no sound', () => {
     const { aps } = payload(options, NOW);
-    assert.deepEqual(aps.alert, { title: 'Cook started: Brisket' });
+    assert.deepEqual(aps.alert, { title: 'Cook started: Brisket', body: 'On the lock screen' });
     assert.equal('sound' in aps.alert, false);
     assert.equal('sound' in aps, false);
+  });
+
+  it('a start always carries an alert body, which iOS requires', () => {
+    const { aps } = payload(parseArgs(['start', ...AUTH, '--cook-id', 'c', '--alert-title', 'Still cooking']), NOW);
+    assert.equal(aps.alert.body, 'On the lock screen');
+    const custom = payload(parseArgs(['start', ...AUTH, '--cook-id', 'c', '--alert-body', 'Mine']), NOW);
+    assert.equal(custom.aps.alert.body, 'Mine');
   });
 
   it('plays a sound only when asked', () => {

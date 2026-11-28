@@ -33,8 +33,11 @@ Terms (lock-screen activity, running cook, closed) are the spec's (#237).
   authorization header, and writes nothing to disk. `--help` lists every
   option; `--dry-run` prints the request and sends nothing.
   - `start --token <push-to-start token> --cook-id <id> --cook-name <name>`
-    starts one, with a banner and **no sound** (`"Cook started: <name>"`; the
-    alert has no `sound` key; `--sound default` would add one).
+    starts one, with a banner and **no sound** (`"Cook started: <name>"`,
+    body `"On the lock screen"`; the alert has no `sound` key; `--sound default`
+    would add one). A start's alert needs a body: without one iOS drops the
+    push and `liveactivitiesd` logs "Received start without an alert
+    configuration", while APNs still answers `200` (#249).
   - `update --token <update token>` with readings (`--grill 230 --probe1 171`)
     and targets (`--target-probe1 203`), degrees F.
   - `end --token <update token>` shows "Cook ended" and dismisses it 15

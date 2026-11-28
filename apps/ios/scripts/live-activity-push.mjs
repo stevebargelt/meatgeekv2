@@ -72,7 +72,9 @@ Content:
 
 Alert (start sends one by default; update and end send none unless asked):
   --alert-title <text>  start default: "Cook started: <cook name>".
-  --alert-body <text>
+  --alert-body <text>   start default: "On the lock screen". iOS drops a start
+                        push whose alert lacks a body ("Received start without
+                        an alert configuration" in liveactivitiesd).
   --sound <name>        Play a sound. Without it the banner is silent.
 
 Delivery:
@@ -195,7 +197,10 @@ export function payload(options, now) {
   if (title !== undefined || options.alertBody !== undefined || options.sound !== undefined) {
     const alert = {};
     if (title !== undefined) alert.title = title;
-    if (options.alertBody !== undefined) alert.body = options.alertBody;
+    // iOS drops a start push whose alert has no body: liveactivitiesd logs
+    // "Received start without an alert configuration" (owner's trial, #249).
+    const body = options.alertBody ?? (options.event === 'start' ? 'On the lock screen' : undefined);
+    if (body !== undefined) alert.body = body;
     // No `sound` key: the banner shows and makes no sound.
     if (options.sound !== undefined) alert.sound = options.sound;
     aps.alert = alert;
