@@ -844,13 +844,14 @@ reached, ingestion-near-cap`" .-> MeatgeekCloudObservability.Logs
 
 ## Delivery pipeline
 
-Pull requests feed two workflows. CI/CD Pipeline runs on every pull request and push to
-main: lint and test, the Cosmos emulator tests on `windows-2025`, builds, Terraform
-validation, the security scan, the `no-real-time` guard, `web-e2e` and `ios`. Test repeat
-(`test-repeat.yml`) runs on pull requests only: each affected non-live suite 50 times in a
-row, its emulator suite on `windows-2025`; it starts nothing and is not a required check.
-CI also runs `ios` on `macos-26`: the iOS app's unit and UI tests in a simulator against
-the in-process stub. A green CI run on main starts the apply, then the deploy and its two
+CI/CD Pipeline runs on every pull request and push to main: lint and test, the Cosmos
+emulator tests on `windows-2025`, builds, Terraform validation, the security scan, the
+`no-real-time` guard and `web-e2e`. `ios` runs in its own workflow on `macos-26`, only
+when a change touches the iOS app or the API spec: the iOS app's tests in a simulator
+against the in-process stub, the UI tests on main only; nothing waits on it. Test repeat
+(`test-repeat.yml`) runs nightly on main: each non-live suite changed since its last run 50
+times in a row, every suite on Sundays; a failing suite opens an issue, and it starts
+nothing. A green CI run on main starts the apply, then the deploy and its two
 acceptance jobs, `acceptance` and `web-acceptance`, in parallel. When a web-acceptance
 sign-in step fails, the proof writes a scrubbed `sign-in-diagnostic.txt`, the leak check
 runs over it, and the run uploads the `web-acceptance-diagnostics` artifact. The iOS Live

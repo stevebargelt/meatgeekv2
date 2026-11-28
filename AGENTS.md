@@ -72,16 +72,19 @@ terraform -chdir=modules/cosmos-db test
 The job also runs each tested module, the bootstrap tests and the gate fixtures: `node tools/test-repeat/test-repeat.mjs
 list` prints each with its command. The `infrastructure` Nx targets `init`, `plan`, `apply`, `destroy` use real state.
 
-iOS (needs a Mac with Xcode 26 and an iPhone 17 simulator; CI's `ios` job runs on `macos-26`):
+iOS (needs a Mac with Xcode 26 and an iPhone 17 simulator; the `ios` workflow, `ios.yml`, runs on `macos-26` only when
+a pull request or push touches `apps/ios/**` or `libs/api-specs/spec/**`):
 
 ```sh
 xcodebuild test -project apps/ios/MeatGeek.xcodeproj -scheme MeatGeek \
   -destination 'platform=iOS Simulator,name=iPhone 17,OS=latest' -skipPackagePluginValidation
 ```
 
-Add `-only-testing:MeatGeekKitTests` for one target. CI also fails if any of the five test targets ran zero tests.
+Add `-only-testing:MeatGeekKitTests` for one target. CI also fails if a test target it ran ran zero tests. On a pull
+request it skips `MeatGeekUITests` (`-skip-testing:MeatGeekUITests`); a push to `main` runs them.
 
-Other CI checks (`test-repeat.yml` runs each suite a pull request touches 50 times; the last line is that, locally):
+Other CI checks (`test-repeat.yml` runs, nightly on `main`, each suite changed since its last run 50 times; the last line
+is that, locally):
 
 ```sh
 node tools/no-real-time/check.mjs                      # no-real-time-guard job
@@ -119,8 +122,8 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
   environment variables.
 - Checks required to merge (branch protection on `main`): `setup`, `lint-and-test` for `api`, `web` and
   `api-interfaces`, both `build-typescript` and both `build-go` legs, `validate-infrastructure`, `security-scan`.
-  Every other job, including the other `lint-and-test` legs, `ios`, `web-e2e` and `test-repeat`, runs on each pull
-  request without gating the merge. `security-scan`'s `npm audit` and Snyk steps are `continue-on-error`; Snyk
+  Every other CI/CD Pipeline job, including the other `lint-and-test` legs and `web-e2e`, runs on each pull request
+  without gating the merge; so does `ios.yml`, on the iOS paths only. `security-scan`'s `npm audit` and Snyk steps are `continue-on-error`; Snyk
   runs only on push to `main`, so `SNYK_TOKEN` never reaches a pull request run.
 
 ## What a merge to `main` starts
@@ -135,8 +138,12 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
    `PROD_DEPLOY_ENABLED` is `true`. It is not set, so the job skips.
 6. Vercel, outside GitHub Actions, builds `apps/web` from `vercel.json` for <https://meatgeekv2-web.vercel.app>.
 
+Also on a merge that touches `apps/ios/**` or `libs/api-specs/spec/**`: `ios.yml` builds the iOS app and runs every
+test target, the stub UI tests included. Nothing waits on it.
+
 Not started by a merge: `infra-deploy-prod.yml` (manual, plan only), `ios-live-proof.yml` (daily at 09:17 UTC and on
-demand), `test-repeat.yml` (pull requests only).
+demand), `test-repeat.yml` (nightly at 07:17 UTC on what changed since its last run, every suite on Sundays, and on
+demand; a failing suite opens a `needs-triage` issue).
 
 ## Agent skills
 
