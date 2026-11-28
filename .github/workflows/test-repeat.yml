@@ -98,9 +98,13 @@ jobs:
           base="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test-repeat.yml --branch main \
             --event schedule --status success --limit 1 --json headSha --jq '.[0].headSha // empty')"
           if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # Every suite, 50 times: compare HEAD with itself, so no file counts
+            # as changed (diffing from the first commit would list the whole
+            # repository, and count the harness as changed, so every suite
+            # would run once).
             echo "No earlier successful nightly run on main: every suite runs."
             labels="$(jq -c '. + ["test-repeat:all"] | unique' <<<"$labels")"
-            base="$(git rev-list --max-parents=0 HEAD | tail -1)"
+            base="$(git rev-parse HEAD)"
           fi
           echo "Base: $base; labels: $labels"
           echo "sha=$base" >> "$GITHUB_OUTPUT"
@@ -115,7 +119,17 @@ jobs:
           node tools/test-repeat/test-repeat.mjs select
           --affected "$BASE_SHA"
           --labels "$LABELS"
+          --out "$RUNNER_TEMP/selection.json"
           --github-output
+
+      - name: Keep the selection for the summary
+        # As a file, not an environment variable: a long changed-files list
+        # (a week of main) is over the size Linux allows one variable.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: selection
+          path: ${{ runner.temp }}/selection.json
+          retention-days: 7
 
   repeat:
     needs: select
@@ -339,11 +353,14 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/test-repeat
 
+      - name: Download the selection
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: selection
+          path: ${{ runner.temp }}
+
       - name: Summarise
-        env:
-          SELECTION: ${{ needs.select.outputs.selection }}
         run: |
-          printf '%s' "$SELECTION" > "$RUNNER_TEMP/selection.json"
           node tools/test-repeat/test-repeat.mjs summary \
             --selection "$RUNNER_TEMP/selection.json" \
             --results "$RUNNER_TEMP/test-repeat/results" \
@@ -389,9 +406,10 @@ jobs:
             }
             console.log([...ids].sort().join("\n"));
           ')"
-          [ -n "$failed" ] || failed="(no result reported)"
-          printf '%s\n' "$failed" | while IFS= read -r suite; do
-            title="test-repeat: $suite failed on main"
+          printf '%s\n' "${failed:-}" | while IFS= read -r suite; do
+            # No suite failed: the run itself did (a job reported nothing, or
+            # the summary could not run). One issue for the workflow.
+            if [ -n "$suite" ]; then title="test-repeat: $suite failed on main"; else suite="the run"; title="test-repeat: the scheduled run failed on main"; fi
             body="The scheduled test-repeat run on \`${GITHUB_SHA:0:7}\` failed for \`$suite\`: $RUN_URL. The run summary has the first failing run, and the artifacts have its log."
             number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
               | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')"
