@@ -1799,7 +1799,6 @@ locals {
     "Monitoring Metrics Publisher",
     "Website Contributor",
     "Storage Blob Data Owner",
-    "Storage Queue Data Contributor",
     "Storage Blob Data Contributor",
     "Azure Event Hubs Data Sender",
     "IoT Hub Registry Contributor",
