@@ -5,8 +5,9 @@ name: Agent review
 # request ready for review once the review is clean. Then, if the repository opted in
 # (variable AGENT_AUTOMERGE=true) and nothing holds it, it turns on auto-merge, so the
 # pull request merges itself when the required checks pass. Held for the owner, with the
-# needs-owner label: a non-empty "Left undone" list in the body (what merging needs
-# first), or a change under a held path (workflows, infrastructure, migrations).
+# needs-owner label and a comment repeating the owner's steps: steps in the body's
+# "🙋 Owner: do this before merging" section (what merging needs first), or a change
+# under a held path (workflows, infrastructure, migrations).
 # "Check by hand later" items (phone, dev measurements) do not hold; they go into one
 # "Checks by hand: #<spec>" issue for the owner.
 #
@@ -63,14 +64,19 @@ jobs:
         run: |
           cat > "$RUNNER_TEMP/hold.sh" <<'EOF'
           set -euo pipefail
-          [[ "$AUTOMERGE" == true ]] || { echo "this repository has not opted in to auto-merge"; exit 0; }
           body=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""')
-          # "Left undone" holds: what the merge itself needs. "Check by hand later" does not.
-          # A section ends at the next heading, a --- rule, or the generated-by footer.
-          undone=$(awk 'tolower($0) ~ /^#* *\**left undone/ {on=1; sub(/^[^:]*[Ll]eft undone[*: ]*/, ""); print; next}
-                        on && (/^#/ || /^---/ || /Generated with/ || /claude\.ai\/code/ || tolower($0) ~ /check by hand/) {on=0} on' <<<"$body" \
-            | grep -viE '^\W*(nothing|none)\W*$' | grep -E '\w' || true)
-          [[ -z "$undone" ]] || { echo "the pull request lists work left undone"; exit 0; }
+          # The owner's section holds: what the merge itself needs. "Check by hand later" does not.
+          # It starts at "🙋 Owner: do this before merging" (or the older "Left undone") and ends at
+          # the first blank line after its steps, the next heading, a Closes line, a --- rule, the
+          # generated-by footer or "Check by hand".
+          # Its steps go, verbatim, into the hold comment.
+          awk 'tolower($0) ~ /^[#* ]*(🙋 *)?(owner: do this before merging|left undone)/ {on=1; sub(/^.*([Mm]erging|[Ll]eft undone)[*: ]*/, ""); print; next}
+               on && seen && /^[[:space:]]*$/ {on=0}
+               on && /[^[:space:]]/ {seen=1}
+               on && (/^#/ || /^---/ || /Generated with/ || /claude\.ai\/code/ || tolower($0) ~ /check by hand|^(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]/) {on=0} on' <<<"$body" \
+            | grep -viE '^\W*(nothing|none)\b' | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' > "$RUNNER_TEMP/owner-steps.md" || true
+          [[ "$AUTOMERGE" == true ]] || { echo "this repository has not opted in to auto-merge"; exit 0; }
+          ! grep -qE '\w' "$RUNNER_TEMP/owner-steps.md" || { echo "the pull request has steps for the owner"; exit 0; }
           held=$(gh pr view "$PR" --repo "$REPO" --json files --jq '.files[].path' | grep -E "$HOLD_PATHS" | head -5 || true)
           [[ -z "$held" ]] || echo "it changes $(echo "$held" | paste -sd, - | sed 's/,/, /g')"
           EOF
@@ -133,7 +139,7 @@ jobs:
             Run every sub-agent, task and command in the foreground and wait for it: this session ends the
             moment you stop, and anything still running in the background is killed with it.
             Your GitHub access (gh, git push) expires about 60 minutes after this run starts. Push your work and
-            update the pull request by minute 50 at the latest; anything still unfinished then goes under "Left undone".
+            update the pull request by minute 50 at the latest; anything still unfinished then goes in the body's "🙋 Owner" section.
 
             1. Review it with the code-review skill: the diff against `origin/${{ github.event.pull_request.base.ref }}`,
                with the issue as the spec (`gh issue view ${{ steps.hold.outputs.issue }}`). Check claims in the
@@ -145,23 +151,27 @@ jobs:
             3. Fix every real finding on this branch. Run the checks AGENTS.md lists for CI; they must pass.
                Commit following AGENTS.md's conventions and push. Reply to each inline comment with what you
                changed, or why it needs no change. Never run `az`, `terraform apply` or `supabase`, and never deploy.
-            4. Sort the pull request body's two closing sections, and fix them if the author misfiled anything:
-               - "Left undone": only what merging needs first, such as a missing step, a secret, an edit to
-                 `.github/workflows/` the agent may not push, or a fix that needs the owner's account. "Nothing" if none.
-               - "Check by hand later": proofs that can only happen after merging, such as on a real phone, a
-                 measurement on dev, or live delivery. These do not hold the merge.
-               If there are checks by hand, add each as a `- [ ] <check> (from #${{ github.event.pull_request.number }})` line to the open
-               issue titled `Checks by hand: #${{ steps.hold.outputs.anchor }}` (find it with
+            4. Sort the pull request body's sections, and fix them if the author misfiled anything:
+               - "## 🙋 Owner: do this before merging", right after the Closes line at the top: only what merging
+                 needs first, such as a missing step, a secret, an edit to `.github/workflows/` the agent may not
+                 push, or a fix that needs the owner's account. Numbered steps, each saying exactly what to edit
+                 or run and how to tell it worked; rewrite any step that is vague. Keep the steps one list with
+                 no blank lines inside it, and a `##` heading after the section. If there are none, the section
+                 is the single line "Nothing, merges itself when green." (An older body's "Left undone" section
+                 becomes this one.)
+               - "## Check by hand later": proofs that can only happen after merging, such as on a real phone, a
+                 measurement on dev, or live delivery. These do not hold the merge. Each item gives the exact
+                 steps and what to look for, or links the doc section that has them; never just the check's name.
+               If there are checks by hand, add each as a `- [ ] <check>: <its steps, or the link to them> (from #${{ github.event.pull_request.number }})`
+               line to the open issue titled `Checks by hand: #${{ steps.hold.outputs.anchor }}` (find it with
                `gh issue list --state open --label checks-by-hand --json number,title`, match the title exactly, and
                create it with the labels `checks-by-hand` and `ready-for-human` if there is none).
             5. When the review is clean (no real findings left, checks pass), run `gh pr ready ${{ github.event.pull_request.number }}`.
-               Then decide the merge from the body as it now stands:
-               - If "Left undone" lists anything, or this pull request changes a path matching `${{ env.HOLD_PATHS }}`,
-                 or the repository variable AGENT_AUTOMERGE is not `true` (it is `${{ vars.AGENT_AUTOMERGE }}`): do not
-                 merge. Run `gh pr edit ${{ github.event.pull_request.number }} --add-label needs-owner` and comment
-                 "Needs the owner before merging: <the reason>."
-               - Otherwise run `gh pr merge ${{ github.event.pull_request.number }} --auto --squash`, so it merges itself once
-                 the required checks pass.
+               Then run `gh pr merge ${{ github.event.pull_request.number }} --auto --squash`, so it merges itself once the
+               required checks pass, only if all of these hold for the body as it now stands: the owner section says
+               "Nothing", the pull request changes no path matching `${{ env.HOLD_PATHS }}`, and the repository variable
+               AGENT_AUTOMERGE is `true` (it is `${{ vars.AGENT_AUTOMERGE }}`). Otherwise leave it: the workflow
+               adds `needs-owner` and comments the owner's steps.
 
             If it is still not clean after two rounds of fixes, leave the pull request as a draft and comment
             on it with what is left and why.
@@ -187,18 +197,26 @@ jobs:
           } > "$RUNNER_TEMP/review.md"
           gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/review.md"
 
-      # The same hold rules, from the code, on the body as the review left it. If the agent
-      # turned auto-merge on where a hold applies, turn it off and hand the pull request over.
+      # The same hold rules, from the code, on the body as the review left it. When one
+      # applies: turn auto-merge off if the agent turned it on, and hand a ready pull request
+      # to the owner with a comment that repeats the owner's steps, so the notification has them.
       - name: Enforce the holds
         if: always()
         run: |
           set -euo pipefail
           [[ "$(gh pr view "$PR" --repo "$REPO" --json state --jq .state)" == OPEN ]] || exit 0
           reason=$(bash "$RUNNER_TEMP/hold.sh")
-          auto=$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')
+          view=$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest,isDraft)
+          auto=$(jq '.autoMergeRequest != null' <<<"$view"); draft=$(jq .isDraft <<<"$view")
           echo "Auto-merge after review: ${reason:-allowed} (auto-merge on: $auto)" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [[ -n "$reason" && "$auto" == true ]]; then
-            gh pr merge "$PR" --repo "$REPO" --disable-auto
-            gh pr edit "$PR" --repo "$REPO" --add-label needs-owner
-            gh pr comment "$PR" --repo "$REPO" --body "Needs the owner before merging: $reason. (Auto-merge turned back off.)"
-          fi
+          [[ -n "$reason" ]] || exit 0
+          note=""
+          if [[ "$auto" == true ]]; then gh pr merge "$PR" --repo "$REPO" --disable-auto; note=" (Auto-merge turned back off.)"; fi
+          [[ "$draft" == false ]] || exit 0
+          gh pr edit "$PR" --repo "$REPO" --add-label needs-owner
+          {
+            echo "## 🙋 Needs the owner before merging"; echo
+            echo "Why: $reason.$note"
+            if grep -qE '\w' "$RUNNER_TEMP/owner-steps.md"; then echo; cat "$RUNNER_TEMP/owner-steps.md"; fi
+          } > "$RUNNER_TEMP/hold.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/hold.md"
