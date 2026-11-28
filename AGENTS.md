@@ -112,8 +112,6 @@ node tools/test-repeat/test-repeat.mjs run utils --runs 20
     `apps/ios/MeatGeekKit/Sources/MeatGeekAPI/openapi.yaml`. `nx test api-specs` fails while it is stale.
   - `libs/api-specs/src/generated/` is not committed. `npx nx generate-types api-specs` writes it, and `web`'s
     build, lint, typecheck and test run it first.
-  - After any change to a `.c4` file, run `npm --prefix docs/architecture/likec4 run gen:diagrams` and commit
-    `docs/architecture/diagrams.md`. Its `check` fails on a stale or hand-edited file.
 - Lockfiles: write `package-lock.json` with the pinned npm (`corepack npm install ...`); see
   [npm and the lockfile](docs/development/ci-cd.md#npm-and-the-lockfile).
   Terraform providers are locked by committed `.terraform.lock.hcl` files (root and each tested module), and CI inits
@@ -165,7 +163,7 @@ Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents
   [Nx commands](docs/development/nx-commands.md), [live acceptance](docs/development/live-acceptance.md),
   [test repeat](tools/test-repeat/README.md), [no-real-time guard](tools/no-real-time/README.md)
 - Architecture: [overview](docs/architecture/system-overview.md), [data flow](docs/architecture/data-flow.md),
-  [diagrams](docs/architecture/diagrams.md), [model](docs/architecture/likec4/README.md),
+  [diagrams](https://stevebargelt.github.io/meatgeekv2/) (from the `.c4` files in [the model](docs/architecture/likec4/README.md)),
   [monorepo](docs/architecture/monorepo-structure.md), [observability](docs/monitoring/observability.md)
 - Projects: [iOS app](apps/ios/README.md), [data-pusher](apps/data-pusher/README.md), [API contract](libs/api-specs/README.md)
 - Runbooks: [devices](docs/devices/runbook.md), [bootstrap](docs/infrastructure/bootstrap-runbook.md),
