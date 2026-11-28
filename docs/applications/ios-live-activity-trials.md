@@ -33,8 +33,11 @@ Terms (lock-screen activity, running cook, closed) are the spec's (#237).
   authorization header, and writes nothing to disk. `--help` lists every
   option; `--dry-run` prints the request and sends nothing.
   - `start --token <push-to-start token> --cook-id <id> --cook-name <name>`
-    starts one, with a banner and **no sound** (`"Cook started: <name>"`; the
-    alert has no `sound` key; `--sound default` would add one).
+    starts one, with a banner and **no sound** (`"Cook started: <name>"`,
+    body `"On the lock screen"`; the alert has no `sound` key; `--sound default`
+    would add one). A start's alert needs a body: without one iOS drops the
+    push and `liveactivitiesd` logs "Received start without an alert
+    configuration", while APNs still answers `200` (#249).
   - `update --token <update token>` with readings (`--grill 230 --probe1 171`)
     and targets (`--target-probe1 203`), degrees F.
   - `end --token <update token>` shows "Cook ended" and dismisses it 15
@@ -56,12 +59,13 @@ token, the key id or the team id into an issue: write "token A", "token B".
 
 1. The sandbox APNs key from [the owner's steps](../infrastructure/apns-key-vault.md#4-create-a-sandbox-apns-key):
    `~/.config/meatgeek/AuthKey_<KEYID>.p8` and `~/.config/meatgeek/apns.env`.
-   The script reads `APNS_KEY_PATH`, `APNS_KEY_ID` and `APPLE_TEAM_ID` from the
+   An alias, not a `PUSH=...` variable: zsh does not split a variable into
+   words, so `$PUSH start` fails with "no such file or directory". The script reads `APNS_KEY_PATH`, `APNS_KEY_ID` and `APPLE_TEAM_ID` from the
    environment when `--key-file`, `--key-id` and `--team-id` are not given:
 
    ```sh
    set -a; . ~/.config/meatgeek/apns.env; set +a
-   PUSH="node apps/ios/scripts/live-activity-push.mjs"
+   alias PUSH='node apps/ios/scripts/live-activity-push.mjs'   # run from the repo root
    ```
 
    The key must allow the sandbox (or both environments) and the
@@ -89,7 +93,7 @@ Each push prints APNs' answer; record it with what the phone showed.
 screen (do not swipe it away), lock the phone.
 
 ```sh
-$PUSH start --token <start token> --cook-id <cook id> --cook-name Brisket --grill 225 --probe1 160 --target-probe1 203
+PUSH start --token <start token> --cook-id <cook id> --cook-name Brisket --grill 225 --probe1 160 --target-probe1 203
 ```
 
 Record: did the banner show, silently; did the activity appear on the lock
@@ -97,7 +101,7 @@ screen. Then open the app's Push tab: does the new activity have an update
 token? Copy it (token A), go to the home screen, and send an update:
 
 ```sh
-$PUSH update --token <token A> --grill 226 --probe1 165 --target-probe1 203
+PUSH update --token <token A> --grill 226 --probe1 165 --target-probe1 203
 ```
 
 Record whether the lock screen changed. (Opening the app also takes the
@@ -106,7 +110,7 @@ lock screen before opening the app, and after the update with the app in the
 background.)
 
 **T2. Start by push, app swiped away.** End T1's activity
-(`$PUSH end --token <token A>`), wait for it to leave, or long-press it away.
+(`PUSH end --token <token A>`), wait for it to leave, or long-press it away.
 Swipe the app away in the app switcher and lock the phone. Send the same
 start push. Record whether it appeared. Then open the app on the Push tab and record whether the new activity
 already has an update token (token B), its **Received** time and the tab's
@@ -119,17 +123,18 @@ whether one comes while the app is open. If none comes at all, repeat T2 with
 `--input-push-token` and record that.
 
 **T3. End and start a fresh one, app in the background.** With an activity
-from T1 or T2 running (its update token copied), the app in the background:
+from T1 or T2 running, the app in the background. "Its token" below is that
+running activity's update token (token A or B), not the start token:
 
 ```sh
-$PUSH end --token <its token>
-$PUSH start --token <start token> --cook-id <cook id> --cook-name Brisket --alert-title "Still cooking: Brisket" --grill 225
+PUSH end --token <its token>
+PUSH start --token <start token> --cook-id <cook id> --cook-name Brisket --alert-title "Still cooking: Brisket" --grill 225
 ```
 
 Record: did "Cook ended" show, did the fresh activity appear, did its banner
 show silently. To update the fresh activity you need its token: open the app,
 record whether the Push tab already shows it and its Received time against App active since, copy it (token C), return to the
-home screen, and send `$PUSH update --token <token C> --grill 230`. Record
+home screen, and send `PUSH update --token <token C> --grill 230`. Record
 whether the lock screen took the update.
 
 **T4. End and start a fresh one, app swiped away.** As T3, with the app
@@ -142,7 +147,7 @@ since.
 the ended activity's token:
 
 ```sh
-$PUSH update --token <the ended activity's token> --grill 231
+PUSH update --token <the ended activity's token> --grill 231
 ```
 
 Record APNs' answer exactly (status and reason; `200`, `400 BadDeviceToken`
