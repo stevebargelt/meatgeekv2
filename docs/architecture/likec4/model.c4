@@ -804,11 +804,13 @@ model {
         wall-clock read, a per-wait deadline, a fixed port, or a `| grep -q` under pipefail, with
         a reviewed exception list (HAR-127, HAR-128); and `web-e2e`: Playwright drives the web
         app's main path against the built app, with Entra, the API and SignalR faked at the
-        network edge, so it needs no secret and no environment (`contents: read` only); and `ios`
-        (HAR-160, HAR-169, HAR-171): on `macos-26` with Xcode 26.6, `xcodebuild test` of the
-        `MeatGeek` scheme in an iPhone simulator, MeatGeekKitTests and MeatGeekLiveTests (Swift
-        Testing), MeatGeekMSALTests (XCTest, hosted in the app, real MSAL) and MeatGeekUITests
-        (XCUITest) against the in-process stub API, then a build-only of MeatGeekLiveUITests (the
+        network edge, so it needs no secret and no environment (`contents: read` only). Also here,
+        though in its own workflow (`ios.yml`) that runs only when a change touches `apps/ios` or
+        `libs/api-specs/spec`, and that nothing after a merge waits on: `ios` (HAR-160, HAR-169,
+        HAR-171): on `macos-26` with Xcode 26.6, the `MeatGeek` scheme built while the iPhone
+        simulator boots, then MeatGeekKitTests and MeatGeekLiveTests (Swift Testing),
+        MeatGeekActivityTests and MeatGeekMSALTests (XCTest, hosted in the app, real MSAL), and on
+        main only MeatGeekUITests (XCUITest) against the in-process stub API, then a build-only of MeatGeekLiveUITests (the
         live proof, which never runs here); simulator signing only (no team, no certificate), no
         secret, `contents: read`, and $0 because the repository is public. Never receives a
         device credential.
@@ -818,13 +820,13 @@ model {
       #live
       technology '.github/workflows/test-repeat.yml, tools/test-repeat'
       description '''
-        Runs on pull requests only (opened, synchronize, reopened, labeled), never on `main`,
-        with `contents: read` and no secrets. It runs every non-live suite the pull request
-        affects 50 times in a row, with Go under `-race`; there are 27 suites, listed in
-        `tools/test-repeat/suites.mjs`. Label `test-repeat:all` selects every suite. Label
-        `test-repeat:load` adds one pass of 8 concurrent copies. A change to the harness itself
-        runs every suite once. Its emulator suite runs on `windows-2025`. It is not a required
-        check.
+        Runs on `main`, never on pull requests: nightly, every non-live suite changed since its
+        last successful scheduled run, 50 times in a row, with Go under `-race`; every suite on
+        Sundays; and on demand (`all`, `load`: one pass of 8 concurrent copies). The suites are
+        listed in `tools/test-repeat/suites.mjs`. A change to the harness itself runs every
+        suite once. Its emulator suite runs on `windows-2025`. A failing suite opens a
+        `needs-triage` issue, or comments on its open one; it never fails `main` or blocks a
+        deploy. `contents: read`, plus `actions: read` and `issues: write`; no secrets.
       '''
       link https://github.com/stevebargelt/meatgeekv2/tree/main/tools/test-repeat 'Source'
     }

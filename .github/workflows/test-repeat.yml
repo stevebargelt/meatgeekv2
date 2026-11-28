@@ -1,38 +1,53 @@
 name: test-repeat
 
-# HAR-107 (goal HAR-106: every test in MeatGeek is deterministic). Runs each
-# test suite a pull request affects 50 times in a row, with the race detector on
-# the Go suites, and reports one table in the job summary. A suite that fails
-# once in 50 runs is flaky, and this is where that shows.
+# HAR-107 (goal HAR-106: every test in MeatGeek is deterministic). Runs test
+# suites 50 times in a row, with the race detector on the Go suites, and reports
+# one table in the job summary. A suite that fails once in 50 runs is flaky, and
+# this is where that shows.
+#
+# It runs on main, not on pull requests: it never gated a merge, and at 18 to 28
+# minutes it was the longest wait on a pull request.
+#
+#   - nightly: the suites affected by what changed on main since the last
+#     successful nightly run (all of them when there is none);
+#   - weekly (Sunday): every suite, so a flake brought in by a dependency or a
+#     runner image change shows even in code nobody touched;
+#   - by hand (workflow_dispatch): `all` runs every suite, `load` adds the
+#     8-copy pass.
 #
 # Selection is tools/test-repeat/suites.mjs's path globs matched against the
-# pull request's changed files (`git diff --name-only <base>...HEAD`):
+# changed files (`git diff --name-only <base>...HEAD`). A change to the harness
+# (tools/test-repeat/** or this file) runs every suite ONCE, proving each
+# command still works in CI without putting not-yet-fixed suites through 50
+# runs.
 #
-#   - a change to the harness (tools/test-repeat/** or this file) runs every
-#     suite ONCE, proving each command still works in CI without putting
-#     not-yet-fixed suites through 50 runs;
-#   - label `test-repeat:all` runs every suite 50 times;
-#   - label `test-repeat:load` adds one pass of each selected suite with 8
-#     copies running at once (--parallel 8).
+# A failed run opens an issue labelled needs-triage for each failing suite, or
+# comments on that suite's open one. It never fails main or blocks a merge.
 #
-# No secret, no environment, no OIDC permission: `contents: read` is the whole
-# token, so it runs on fork pull requests exactly like ci.yml's web-e2e job.
-# Keep it that way.
-#
-# Every label event re-runs the workflow (the newest run cancels the older
-# one): a run skipped because an unrelated label was added would leave a green
-# "skipped" check standing in for a red one.
+# No secret, no environment, no OIDC permission. The token is `contents: read`,
+# plus `actions: read` in select (to find the last nightly run) and
+# `issues: write` in report.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
-    branches: [main]
+  schedule:
+    - cron: '17 7 * * 1-6' # nightly: what changed since the last nightly run
+    - cron: '17 7 * * 0' # weekly: every suite
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Run every suite 50 times
+        type: boolean
+        default: false
+      load:
+        description: Add one pass of each selected suite with 8 copies at once
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: test-repeat-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: test-repeat
+  cancel-in-progress: false
 
 env:
   NODE_VERSION: '24'
@@ -43,6 +58,9 @@ jobs:
     name: test-repeat select
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       selection: ${{ steps.select.outputs.selection }}
       matrix: ${{ steps.select.outputs.matrix }}
@@ -65,15 +83,38 @@ jobs:
         # Node built-ins only: nothing to install.
         run: node tools/test-repeat/run-tests.mjs
 
+      - name: Find what to compare against
+        # The last successful scheduled run's commit. None (the first run, or
+        # every earlier one failed): every suite is selected.
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALL: ${{ (github.event_name == 'schedule' && github.event.schedule == '17 7 * * 0') || inputs.all == true }}
+          LOAD: ${{ inputs.load == true }}
+        run: |
+          labels='[]'
+          if [ "$ALL" = "true" ]; then labels='["test-repeat:all"]'; fi
+          if [ "$LOAD" = "true" ]; then labels="$(jq -c '. + ["test-repeat:load"]' <<<"$labels")"; fi
+          base="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test-repeat.yml --branch main \
+            --event schedule --status success --limit 1 --json headSha --jq '.[0].headSha // empty')"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "No earlier successful nightly run on main: every suite runs."
+            labels="$(jq -c '. + ["test-repeat:all"] | unique' <<<"$labels")"
+            base="$(git rev-list --max-parents=0 HEAD | tail -1)"
+          fi
+          echo "Base: $base; labels: $labels"
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "labels=$labels" >> "$GITHUB_OUTPUT"
+
       - name: Select affected suites
         id: select
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          LABELS: ${{ steps.base.outputs.labels }}
         run: >-
           node tools/test-repeat/test-repeat.mjs select
           --affected "$BASE_SHA"
-          --labels "$PR_LABELS"
+          --labels "$LABELS"
           --github-output
 
   repeat:
@@ -307,3 +348,56 @@ jobs:
             --selection "$RUNNER_TEMP/selection.json" \
             --results "$RUNNER_TEMP/test-repeat/results" \
             --step-summary
+
+  # A failed run is reported as an issue per failing suite (needs-triage), or a
+  # comment on that suite's open issue. Main stays green: a flake is a ticket,
+  # not a reason to stop deploys.
+  report:
+    name: test-repeat report
+    needs: [select, repeat, repeat-emulator, summary]
+    if: always() && needs.select.result == 'success' && needs.summary.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: test-repeat-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/test-repeat
+
+      - name: Open or update an issue per failing suite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: ${{ runner.temp }}/test-repeat/results
+        run: |
+          # A result with a failed run, or a load copy that failed. A run whose
+          # jobs reported nothing at all becomes one issue for the whole run.
+          failed="$(node -e '
+            const fs = require("fs"), path = require("path");
+            const dir = process.env.RESULTS;
+            const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith(".json")) : [];
+            const ids = new Set();
+            for (const f of files) {
+              const r = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+              if (r.failedRun !== null || (r.copies || []).some(c => c.failedRun !== null)) ids.add(r.suite);
+            }
+            console.log([...ids].sort().join("\n"));
+          ')"
+          [ -n "$failed" ] || failed="(no result reported)"
+          printf '%s\n' "$failed" | while IFS= read -r suite; do
+            title="test-repeat: $suite failed on main"
+            body="The scheduled test-repeat run on \`${GITHUB_SHA:0:7}\` failed for \`$suite\`: $RUN_URL. The run summary has the first failing run, and the artifacts have its log."
+            number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
+              | jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty')"
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label needs-triage --body "$body"
+            fi
+          done
