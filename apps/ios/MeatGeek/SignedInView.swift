@@ -11,7 +11,7 @@ import SwiftUI
 /// the Cooks tab. A tapped alert opens its cook on the Cooks tab too,
 /// whichever tab showed.
 struct SignedInView: View {
-    enum TabID: Hashable { case cooks, devices }
+    enum TabID: Hashable { case cooks, devices, pushTokens }
 
     let session: SessionModel
     let notifications: NotificationsModel?
@@ -21,6 +21,10 @@ struct SignedInView: View {
     @State private var tab = TabID.cooks
     @State private var cooksPath: [Route] = []
     @Environment(\.scenePhase) private var scenePhase
+    #if DEBUG
+    /// Debug builds only: the push tokens for hand-sent test pushes (#248).
+    @State private var pushTokens: ActivityPushTokensModel?
+    #endif
     /// A cook to open, from a tapped lock-screen activity. Cleared once shown.
     @Binding var openCook: String?
 
@@ -43,6 +47,9 @@ struct SignedInView: View {
             devices: devices, now: now, live: live, notifications: notifications,
             activities: activities, activityLive: activityLive
         ))
+        #if DEBUG
+        _pushTokens = State(initialValue: activities.map { ActivityPushTokensModel(port: $0, now: now) })
+        #endif
     }
 
     var body: some View {
@@ -55,6 +62,13 @@ struct SignedInView: View {
                 DevicesView(model: devices, cooks: cooks, profile: profile, session: session)
             }
             .accessibilityIdentifier(AccessibilityID.devicesTab)
+            #if DEBUG
+            if let pushTokens {
+                Tab("Push", systemImage: "antenna.radiowaves.left.and.right", value: TabID.pushTokens) {
+                    PushTokensView(model: pushTokens)
+                }
+            }
+            #endif
         }
         .task { await profile.load() }
         // Signed in, and each time the app comes back: the permission may
@@ -63,6 +77,9 @@ struct SignedInView: View {
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active { notifications?.refresh() }
             cooks.activities?.setAppActive(phase == .active)
+            #if DEBUG
+            if phase == .active { pushTokens?.start() }
+            #endif
         }
         .onChange(of: notifications?.openCookID, initial: true) { _, cookID in
             guard let cookID else { return }
@@ -76,7 +93,12 @@ struct SignedInView: View {
             cooksPath = [.cook(cookID)]
             openCook = nil
         }
-        .onDisappear { cooks.activities?.stop() }
+        .onDisappear {
+            cooks.activities?.stop()
+            #if DEBUG
+            pushTokens?.stop()
+            #endif
+        }
     }
 }
 

@@ -189,6 +189,11 @@ network. Add `-only-testing:<target>[/<class>/<test>]` to run one. The tests
 follow the [deterministic test rule](../development/deterministic-tests.md):
 no sleeps, and no timeout decides a result.
 
+**The hand-sent push script** (#248), `apps/ios/scripts/live-activity-push.mjs`:
+`node --test apps/ios/scripts/test/live-activity-push.test.mjs`. It and the
+debug build's Push tab are the kit for
+[the lock-screen trials](ios-live-activity-trials.md) on the owner's iPhone.
+
 **The live proof** (`MeatGeekLiveUITests`, HAR-169) runs the real app in a
 throwaway simulator against dev: it signs in on Microsoft's real pages as the
 acceptance user (password and TOTP), claims a simulated device, starts a cook,

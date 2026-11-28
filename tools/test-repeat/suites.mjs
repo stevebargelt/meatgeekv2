@@ -306,6 +306,17 @@ export const suites = [
     timeoutSec: 600,
   },
 
+  // --- The iOS hand-push sender (#248) ----------------------------------------
+  {
+    id: 'ios-live-activity-push',
+    command: ['node', '--test', 'apps/ios/scripts/test/live-activity-push.test.mjs'],
+    // Not apps/ios/scripts/**: run-live-proof.sh there reads live-proof
+    // variables this suite never uses.
+    paths: ['apps/ios/scripts/live-activity-push.mjs', 'apps/ios/scripts/test/**'],
+    needs: [],
+    timeoutSec: 300,
+  },
+
   // --- The harness itself -----------------------------------------------------
   {
     id: 'test-repeat-harness',
