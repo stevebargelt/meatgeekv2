@@ -1309,13 +1309,14 @@ name_ref_child_blocks() {
     # carrying it also has a name-referenced parent).
     # An id-form parent reference on an argument the pinned provider does not
     # ForceNew (see NON_FORCENEW_ID_ARGS): `<arg> = <type>.<label>.id`, bare, on a
-    # resource whose type is listed with that argument.
+    # resource whose type is listed with that argument. Each hit is recorded as
+    # `<arg>=<parent address>`, so a failure names the argument that matched.
     function scan_nf_ids(s,   arg, addr) {
       if (s !~ /^[[:space:]]*[a-z][a-z0-9_]*[[:space:]]*=[[:space:]]*[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\.id[[:space:]]*$/) return
       arg = s; sub(/^[[:space:]]+/, "", arg); sub(/[[:space:]]*=.*$/, "", arg)
       if (index(" " nfargs " ", " " rtype ":" arg " ") == 0) return
       addr = s; sub(/^[^=]*=[[:space:]]*/, "", addr); sub(/\.id[[:space:]]*$/, "", addr)
-      if (index(" " nfparents " ", " " addr " ") == 0) nfparents = nfparents " " addr
+      if (index(" " nfparents " ", " " arg "=" addr " ") == 0) nfparents = nfparents " " arg "=" addr
     }
     function emit() {
       if (label != "" && (trim(parents) != "" || trim(nfparents) != "" || trim(rtb) != ""))
@@ -1451,10 +1452,13 @@ while IFS=$'\t' read -r n_file n_line n_child n_parents n_nfparents n_rtb; do
     name_replace_hits+="${n_file}:${n_line}: ${n_child}'s replace_triggered_by names the whole resource ${n_bare} instead of ${n_bare}.id — a BARE whole-resource trigger also fires when that parent is planned for an in-place UPDATE, so an ordinary tag / sku / policy edit on ${n_bare} would DESTROY AND RECREATE ${n_child} (on a Cosmos database or container that is every stored document; on an IoT Hub route or consumer group it is a routing gap and a trigger rebind). That is strictly worse than the orphaning replace_triggered_by is here to prevent. Name the parent's identity instead: ${n_bare}.id is unknown at plan time when ${n_bare} is REPLACED, so the trigger still fires, and byte-identical across an in-place edit, so it stays quiet (MG-48 F4)"$'\n'
   done <<< "${rtb_bare}"
   if [[ "${n_nfparents}" != "-" ]]; then
-    for n_nfparent in ${n_nfparents}; do
+    for n_nfref in ${n_nfparents}; do
+      # Each token is `<argument>=<parent address>` (see scan_nf_ids).
+      n_nfarg="${n_nfref%%=*}"
+      n_nfparent="${n_nfref#*=}"
       nf_id_pairs=$((nf_id_pairs + 1))
       if ! grep -qxF "${n_nfparent}" <<< "${rtb_ids}" && ! grep -qxF "${n_nfparent}" <<< "${rtb_bare}"; then
-        name_replace_hits+="${n_file}:${n_line}: ${n_child} sets namespace_id = ${n_nfparent}.id but declares no lifecycle { replace_triggered_by = [${n_nfparent}.id] } — an id reference goes unknown when ${n_nfparent} is replaced, but the pinned azurerm 4.x does not mark that argument ForceNew, so Terraform plans an in-place UPDATE of a ${n_child} Azure has already destroyed with its parent rather than a replacement. Keep the trigger until the deliberate v5 upgrade makes the argument ForceNew (#227; see NON_FORCENEW_ID_ARGS)"$'\n'
+        name_replace_hits+="${n_file}:${n_line}: ${n_child} sets ${n_nfarg} = ${n_nfparent}.id but declares no lifecycle { replace_triggered_by = [${n_nfparent}.id] } — an id reference goes unknown when ${n_nfparent} is replaced, but the pinned azurerm 4.x does not mark that argument ForceNew, so Terraform plans an in-place UPDATE of a ${n_child} Azure has already destroyed with its parent rather than a replacement. Keep the trigger until the deliberate v5 upgrade makes the argument ForceNew (#227; see NON_FORCENEW_ID_ARGS)"$'\n'
       fi
     done
   fi
@@ -1493,8 +1497,12 @@ if [[ "${name_ref_pairs}" -eq 0 ]]; then
 elif [[ "${name_ref_pairs}" -lt "${NAME_REF_PAIR_FLOOR}" ]]; then
   name_replace_hits+="this scan discovered ${name_ref_pairs} name-referenced (child, parent) pair(s), below the recorded floor of ${NAME_REF_PAIR_FLOOR} — THE SCAN HAS NARROWED and must be re-examined before this number is touched. A zero test alone would have passed this: nineteen of twenty pairs can stop being discovered while one still is, and every child that dropped out is then unguarded with the check still green. Find out WHY the count fell first. If a discovery regex, the block-boundary assumption or the exclusion boundary was edited, that edit is the defect — fix it, do not lower the floor to match it. Only lower NAME_REF_PAIR_FLOOR (in this script, next to its definition) when the tree genuinely lost a pair — a resource deleted, or one moved off a configured-name reference onto a computed one — and say which pair and why in the commit message. Re-baselining this casually converts the guard back into the fail-open scan it was written to replace"$'\n'
 fi
-if [[ "${nf_id_pairs}" -lt "${NONFORCENEW_ID_PAIR_FLOOR}" ]]; then
-  name_replace_hits+="this scan discovered ${nf_id_pairs} non-ForceNew id (child, parent) pair(s) from NON_FORCENEW_ID_ARGS, below the recorded floor of ${NONFORCENEW_ID_PAIR_FLOOR} — the scan has narrowed or a listed child moved. Find out why before touching the floor (#227)"$'\n'
+if [[ -n "${NON_FORCENEW_ID_ARGS// /}" && "${nf_id_pairs}" -eq 0 ]]; then
+  # Fail closed whatever the floor says: while NON_FORCENEW_ID_ARGS lists an
+  # argument, finding no child that sets it means the scan stopped working.
+  name_replace_hits+="no '<arg> = <type>.<label>.id' reference for any NON_FORCENEW_ID_ARGS entry (${NON_FORCENEW_ID_ARGS}) found in any resource block under ${INFRA_DIR} — the non-ForceNew id half of this check has stopped working (it must never pass by finding nothing). Its discovery matches only a bare single-line \`<arg> = <type>.<label>.id\`; if the reference was rewritten (interpolated, wrapped, moved), widen the scan. If the listed argument genuinely left the tree, remove its entry from NON_FORCENEW_ID_ARGS (#227)"$'\n'
+elif [[ "${nf_id_pairs}" -lt "${NONFORCENEW_ID_PAIR_FLOOR}" ]]; then
+  name_replace_hits+="this scan discovered ${nf_id_pairs} non-ForceNew id (child, parent) pair(s) from NON_FORCENEW_ID_ARGS, below the recorded floor of ${NONFORCENEW_ID_PAIR_FLOOR} — THE SCAN HAS NARROWED or a listed child moved. Find out WHY the count fell first: if scan_nf_ids or the block-boundary assumption was edited, that edit is the defect — fix it, do not lower the floor to match it. Only lower NONFORCENEW_ID_PAIR_FLOOR (next to its definition) when the tree genuinely lost a pair — a resource deleted, or its argument made ForceNew by a provider upgrade — and say which pair and why in the commit message (#227)"$'\n'
 fi
 # Print the discovered size so a pass is demonstrably non-vacuous rather than a
 # scan that quietly matched nothing.

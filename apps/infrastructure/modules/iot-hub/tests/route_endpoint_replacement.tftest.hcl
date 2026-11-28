@@ -123,5 +123,4 @@ run "eventhub_endpoint_reaches_its_parents_through_static_literal_names" {
     condition     = azurerm_iothub_endpoint_eventhub.eventhub_realtime.endpoint_uri == "sb://${azurerm_eventhub_namespace.main.name}.servicebus.windows.net"
     error_message = "the Event Hub endpoint's endpoint_uri must be built from azurerm_eventhub_namespace.main's configured name — an interpolated name is still a configured literal, so this reference is the second parent pairing the endpoint's replace_triggered_by must name; a scan keyed on bare `<type>.<label>.name` references would miss it entirely"
   }
-
 }
