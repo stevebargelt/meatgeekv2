@@ -82,7 +82,7 @@ endpoint: "eventhub-realtime"   # -> temperature-data
 
 ### 3. Storage Path Details
 
-See the [`data`](https://stevebargelt.github.io/meatgeekv2/#/view/data/) view. IoT Hub's `cosmos-storage-route` writes into the `temperatures` container, partitioned on `/deviceId` with the value stamped from `{deviceid}`. Readings expire by the container's `default_ttl`, set from `temperature_data_ttl_days` × 86400 s (`var.temperature_data_ttl`; 7 days in dev, 90 in prod).
+See the [`data`](https://stevebargelt.github.io/meatgeekv2/#/view/data/) view. IoT Hub's `cosmos-storage-route` writes into the `temperatures` container, partitioned on `/deviceId` with the value stamped from `{deviceid}`. Each reading expires on its own, as [ADR 0001](../adr/0001-readings-are-short-lived-charts-are-permanent.md) decides: the device sets the Cosmos `ttl` in the message body, 604800 s (7 days) when the reading carries a `cookId` and 86400 s (24 h) when it does not (`wire.ReadingTTLSeconds` in data-pusher, which simdevice shares). The container's `default_ttl` is 604800 s in every environment (`readings_default_ttl_seconds` in the `cosmos-db` module); it lets Cosmos honour the per-item `ttl` and expires a reading sent without one by an older device build. Cosmos counts from the write, so a reading buffered offline and sent late expires that long after it arrives.
 
 **Data Organization**: IoT Hub stores its message envelope, not the bare device payload. The endpoint stamps a top-level `deviceId` from the authenticated device id (`partition_key_template = "{deviceid}"`):
 ```json

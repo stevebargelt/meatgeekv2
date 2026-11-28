@@ -204,6 +204,9 @@ func TestMain_CountThreeAgainstMockClient(t *testing.T) {
 		if reading.GrillTemp == nil || reading.Probe1Temp == nil {
 			t.Errorf("call %d payload lacks grill/probe temps: %s", i, calls[i].Payload)
 		}
+		if reading.CookID != nil || reading.TTL != 86400 {
+			t.Errorf("call %d outside a cook: cookId %v, ttl %d, want none and 86400 (24h; ADR 0001)", i, reading.CookID, reading.TTL)
+		}
 
 		props := calls[i].Properties
 		if props["$.ct"] != "application/json" || props["$.ce"] != "utf-8" {

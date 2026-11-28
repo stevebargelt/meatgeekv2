@@ -117,8 +117,8 @@ run "destination_temperatures_keeps_the_create_only_deviceid_partition_key" {
   }
 
   assert {
-    condition     = azurerm_cosmosdb_sql_container.temperatures_shared.default_ttl == var.temperature_data_ttl
-    error_message = "The destination temperatures container must reproduce the source default_ttl (var.temperature_data_ttl). TTL is part of the faithful definition MG-53 requires."
+    condition     = azurerm_cosmosdb_sql_container.temperatures_shared.default_ttl == 604800
+    error_message = "The temperatures container's default_ttl must be 604800 (7 days) in every environment (ADR 0001, #286). Each Reading carries its own ttl; this is the fallback for one that arrives without, and it must be a value, not -1, so such a Reading still expires."
   }
 }
 

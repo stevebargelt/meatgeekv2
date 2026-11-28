@@ -31,9 +31,8 @@ import { defineProofs, ProofFailure } from '../lib/proof';
  *
  * The device is registered to the caller by `telemetry-roundtrip.proof.ts`,
  * which runs first (file-name order). Readings are never deleted; they expire
- * on the dev `temperatures` TTL (7 days, `temperature_data_ttl_days` in
- * `apps/infrastructure/environments/dev.tfvars`), which is why every run checks
- * the volume and tops it up when it is short.
+ * on their own `ttl` (ADR 0001: these carry no `cookId`, so 24 hours), which
+ * is why every run checks the volume and tops it up when it is short.
  */
 
 /**

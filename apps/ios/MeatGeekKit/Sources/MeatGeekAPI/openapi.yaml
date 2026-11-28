@@ -1318,8 +1318,8 @@ paths:
         4. The device document is deleted. No body on success.
 
         Only the device goes. Its cooks stay in the caller's history (GET
-        /cooks still lists them), and its readings expire on the temperatures
-        container's TTL (7 days in dev, 90 in prod). A later owner sees only
+        /cooks still lists them), and its readings expire on their own TTL
+        (ADR 0001: 7 days in a cook, 24 hours outside one). A later owner sees only
         readings from their own `claimedAt` on.
 
         Unlike GET and PATCH, which answer 404 for both, DELETE tells a device

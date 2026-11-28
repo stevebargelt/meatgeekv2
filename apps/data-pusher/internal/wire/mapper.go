@@ -27,7 +27,8 @@ func inRange(v float64) bool {
 // cookId is threaded through as a pointer so the queue runner (the only
 // caller that knows the active cook) can pass cooksession.ActiveCookID()
 // directly; a nil cookId serializes as `cookId` absent on the wire,
-// which is the V2 spec's nullable behavior.
+// which is the V2 spec's nullable behavior. cookId also sets the Reading's
+// Cosmos ttl (ReadingTTLSeconds, ADR 0001).
 //
 // timestamp is taken as an explicit argument rather than time.Now() so
 // the caller controls the wall clock for tests and so the MessageId
@@ -56,6 +57,7 @@ func MapV1ToTemperatureReading(v1 V1Status, timestamp time.Time, cookID *string)
 		Probe2Temp: cleanProbe(v1.Temps.Probe2Temp),
 		Probe3Temp: cleanProbe(v1.Temps.Probe3Temp),
 		Probe4Temp: cleanProbe(v1.Temps.Probe4Temp),
+		TTL:        ReadingTTLSeconds(cookID),
 	}
 }
 

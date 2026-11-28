@@ -77,16 +77,6 @@ variable "cosmos_enable_free_tier" {
   default     = false
 }
 
-variable "temperature_data_ttl_days" {
-  description = "TTL for temperature data in days"
-  type        = number
-  default     = 90
-  validation {
-    condition     = var.temperature_data_ttl_days >= 1 && var.temperature_data_ttl_days <= 365
-    error_message = "Temperature data TTL must be between 1 and 365 days."
-  }
-}
-
 # Azure Functions Configuration — FLEX CONSUMPTION (MG-24).
 # The former functions_app_service_plan_sku (Y1/EP1) is REMOVED: a single Flex
 # Consumption model runs both dev and prod on the fixed FC1 plan, tuned by the

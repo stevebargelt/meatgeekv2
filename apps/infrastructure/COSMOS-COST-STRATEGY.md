@@ -197,7 +197,7 @@ Each Database Contains:
 - **Throughput**: 400 RU/s shared across 5 containers
 - **Monthly Cost**: ~$24 USD
 - **Usage Pattern**: Low volume development testing
-- **TTL**: 7 days for temperature data (cost savings)
+- **TTL**: per reading, the same in every environment (see Data Retention Strategy)
 - **Features**: Basic functionality testing, rapid iteration
 
 ### Staging Environment (`meatgeek-staging`)
@@ -206,7 +206,7 @@ Each Database Contains:
 - **Auto-scale Maximum**: 1000 RU/s (for load testing spikes)
 - **Monthly Cost**: ~$24 base + minimal scaling costs
 - **Usage Pattern**: Integration testing, moderate load testing
-- **TTL**: 30 days for temperature data
+- **TTL**: per reading, the same in every environment (see Data Retention Strategy)
 - **Features**: Full feature testing, performance validation
 
 ### Production Environment (`meatgeek-prod`)
@@ -215,7 +215,7 @@ Each Database Contains:
 - **Auto-scale Maximum**: 4000 RU/s (scales based on actual load)
 - **Monthly Cost**: ~$24 base + scaling costs only when needed
 - **Usage Pattern**: Live user traffic, real device data
-- **TTL**: 90 days for temperature data (full retention)
+- **TTL**: per reading, the same in every environment (see Data Retention Strategy)
 - **Features**: High availability, backup, monitoring, scales with growth
 
 ## Total Estimated Monthly Cost
@@ -275,9 +275,11 @@ Using **database-level shared throughput** instead of container-level provides:
 
 ### Temperature Data (Largest Volume)
 
-- **Development**: 7-day TTL → Minimal storage costs
-- **Staging**: 30-day TTL → Reduced storage for testing
-- **Production**: 90-day TTL → Full historical analysis capability
+- The same in every environment, set on each reading
+  ([ADR 0001](../../docs/adr/0001-readings-are-short-lived-charts-are-permanent.md)):
+  7 days for a reading in a cook, 24 hours for one outside a cook. The
+  container's `default_ttl` (7 days) covers a reading sent without a `ttl`.
+- A cook's chart (`temperature-rollups`) has no TTL and outlives the readings.
 
 ### Other Data (Smaller Volume)
 

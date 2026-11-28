@@ -44,7 +44,7 @@ import { topupTimeLimitMs, VOLUME } from './telemetry-volume.proof';
  *
  * The first run tops up once: 8,640 messages, ~86k RU of routed writes plus
  * the rollup writes. Rollups have no TTL, so later runs find the chart covered
- * and send nothing; the raw readings expire after 7 days, but the chart never
+ * and send nothing; the raw readings expire (ADR 0001), but the chart never
  * reads them. If the cook is stopped by hand, the next run starts a new one
  * and tops that up. The file name sorts after cooks-lifecycle.proof.ts and
  * telemetry-volume.proof.ts, so it runs after both (file-name order).

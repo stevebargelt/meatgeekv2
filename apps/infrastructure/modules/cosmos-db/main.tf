@@ -24,6 +24,10 @@ locals {
     0,
     44
   )
+
+  # The temperatures container's fallback TTL, 7 days. See the comment on its
+  # default_ttl and ADR 0001.
+  readings_default_ttl_seconds = 604800
 }
 
 # V2-owned CosmosDB account
@@ -225,7 +229,15 @@ resource "azurerm_cosmosdb_sql_container" "temperatures_shared" {
   # temperatures container carries throughput = 400; that is intentionally NOT
   # reproduced here.
 
-  default_ttl = var.temperature_data_ttl
+  # Each Reading carries its own `ttl` (ADR 0001,
+  # docs/adr/0001-readings-are-short-lived-charts-are-permanent.md): the device
+  # sends 604800 (7 days) in a Cook and 86400 (24 h) outside one. Cosmos honours
+  # a per-item ttl only when default_ttl is set, so this is the fallback for a
+  # Reading that arrives without one (an older device build). It is not -1,
+  # which would keep such a Reading forever; it is the longer of the two, so a
+  # Reading that may belong to a Cook never expires earlier than the ADR says.
+  # The same in every environment: no variable on purpose.
+  default_ttl = local.readings_default_ttl_seconds
 
   indexing_policy {
     indexing_mode = "consistent"

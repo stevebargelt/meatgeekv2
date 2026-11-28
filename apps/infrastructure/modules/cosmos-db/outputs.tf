@@ -109,6 +109,6 @@ output "environment_info" {
   value = {
     environment     = var.environment
     database_prefix = var.resource_prefix
-    ttl_days        = var.temperature_data_ttl / 86400
+    ttl_days        = local.readings_default_ttl_seconds / 86400
   }
 }

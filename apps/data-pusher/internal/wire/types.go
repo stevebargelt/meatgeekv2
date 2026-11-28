@@ -60,6 +60,29 @@ type TemperatureReading struct {
 	Probe2Temp *float64  `json:"probe2Temp,omitempty"`
 	Probe3Temp *float64  `json:"probe3Temp,omitempty"`
 	Probe4Temp *float64  `json:"probe4Temp,omitempty"`
+	// TTL is the Reading's own Cosmos DB time to live, in seconds. IoT Hub
+	// routes the body straight into the temperatures container, so Cosmos
+	// reads this field as the document's ttl (ADR 0001, #286). The mapper
+	// sets it from cookId; see ReadingTTLSeconds.
+	TTL int `json:"ttl"`
+}
+
+// The per-Reading expiry ADR 0001 decides
+// (docs/adr/0001-readings-are-short-lived-charts-are-permanent.md): a Reading
+// that belongs to a Cook expires 7 days after it is written, one taken while
+// no Cook is active after 24 hours. Cosmos counts from the write, so a
+// Reading buffered offline and sent late expires that long after it arrives.
+const (
+	ReadingInCookTTLSeconds      = 7 * 24 * 60 * 60 // 604800
+	ReadingOutsideCookTTLSeconds = 24 * 60 * 60     // 86400
+)
+
+// ReadingTTLSeconds is the ttl of a Reading with the given cookId.
+func ReadingTTLSeconds(cookID *string) int {
+	if cookID != nil {
+		return ReadingInCookTTLSeconds
+	}
+	return ReadingOutsideCookTTLSeconds
 }
 
 // V2DeviceStatus mirrors device.yaml#/DeviceStatus — the hardware

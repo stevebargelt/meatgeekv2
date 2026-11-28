@@ -93,12 +93,16 @@ func TestTwin_PrintsTwinLineThenSendsReadingsWithTheCook(t *testing.T) {
 	for _, m := range tel {
 		var body struct {
 			CookID *string `json:"cookId"`
+			TTL    int     `json:"ttl"`
 		}
 		if err := json.Unmarshal(m.Payload, &body); err != nil {
 			t.Fatalf("payload: %v", err)
 		}
 		if body.CookID == nil || *body.CookID != "c1" {
 			t.Errorf("reading cookId = %v, want c1", body.CookID)
+		}
+		if body.TTL != 604800 {
+			t.Errorf("reading ttl = %d, want 604800 (7 days, in a cook; ADR 0001)", body.TTL)
 		}
 		if got := m.Properties.Get(iothub.CorrelationIDPropertyName); got != "r1" {
 			t.Errorf("reading correlation.id = %q, want r1", got)

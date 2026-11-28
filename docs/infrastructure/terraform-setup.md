@@ -328,8 +328,9 @@ location    = "West US 2"   # Flex-supported region (MG-24). NOTE: location fans
 iot_hub_sku_name     = "S1"   # S1 required for message routing (F1 cannot route)
 iot_hub_sku_capacity = 1
 
-cosmos_enable_free_tier   = true  # dev holds the subscription's one free-tier slot (MG-48)
-temperature_data_ttl_days = 7
+cosmos_enable_free_tier = true  # dev holds the subscription's one free-tier slot (MG-48)
+# No readings TTL here: each reading carries its own (ADR 0001), and the
+# temperatures container's 7-day fallback is the same in every environment.
 
 # Azure Functions: SINGLE Flex Consumption model (FC1) for both envs — the former
 # functions_app_service_plan_sku (Y1/EP1) is REMOVED (MG-24). Tuned by scale knobs:
