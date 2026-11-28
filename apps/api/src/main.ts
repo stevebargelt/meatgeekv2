@@ -53,6 +53,7 @@ import {
   STORAGE_HEARTBEAT_SCHEDULE,
   storageHeartbeatHandler,
 } from './functions/health/storage-heartbeat';
+import { DEVICE_SILENCE_SCHEDULE, deviceSilenceHandler } from './functions/devices/device-silence';
 
 // Register HTTP triggers
 app.http('getCooks', {
@@ -348,7 +349,7 @@ app.http('apnsHealth', {
   handler: apnsHealthHandler,
 });
 
-// Host-storage heartbeat (MG-58). The ONLY timer in this app: the host keeps
+// Host-storage heartbeat (MG-58). The dedicated host-storage proof: the host keeps
 // this timer's schedule status and singleton lease in the host storage account,
 // so the invocation itself is the proof that host storage authenticates. When it
 // was added, every other registration was an HTTP trigger, which needs no host
@@ -358,6 +359,14 @@ app.http('apnsHealth', {
 app.timer('storageHeartbeat', {
   schedule: STORAGE_HEARTBEAT_SCHEDULE,
   handler: storageHeartbeatHandler,
+});
+
+// Device silence (#231): every 5 minutes, counts the devices with an active cook
+// that IoT Hub has not heard from for 10 minutes. The device-silent-during-cook
+// log search alert reads its line from FunctionAppLogs.
+app.timer('deviceSilence', {
+  schedule: DEVICE_SILENCE_SCHEDULE,
+  handler: deviceSilenceHandler,
 });
 
 console.log('MeatGeek V2 API Functions registered successfully');

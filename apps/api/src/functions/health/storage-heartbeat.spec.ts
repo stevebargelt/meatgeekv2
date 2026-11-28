@@ -21,6 +21,7 @@ import {
   formatStorageHeartbeat,
   storageHeartbeatHandler,
 } from './storage-heartbeat';
+import { DEVICE_SILENCE_SCHEDULE, deviceSilenceHandler } from '../devices/device-silence';
 
 interface TimerRegistration {
   schedule: string;
@@ -172,13 +173,21 @@ describe('MG-58: the storage heartbeat is the host-storage proof path', () => {
       require('../../main');
     });
 
-    it('registers exactly one timer, pointing at this handler on this schedule', () => {
-      // Exactly one: a second timer would be a second lease-holder in the host
-      // storage account, and would make "the timer fired" ambiguous evidence.
-      expect(Object.keys(timerRegistrations)).toEqual(['storageHeartbeat']);
+    it('registers the heartbeat timer, pointing at this handler on this schedule', () => {
+      // The heartbeat's evidence is its own marker line (STORAGE_HEARTBEAT_MARKER),
+      // so another timer (#231 deviceSilence) does not make it ambiguous. Any
+      // further timer is added here on purpose, never by accident.
+      expect(Object.keys(timerRegistrations).sort()).toEqual(['deviceSilence', 'storageHeartbeat']);
       expect(timerRegistrations['storageHeartbeat']).toEqual({
         schedule: STORAGE_HEARTBEAT_SCHEDULE,
         handler: storageHeartbeatHandler,
+      });
+    });
+
+    it('registers the #231 device-silence timer on its schedule', () => {
+      expect(timerRegistrations['deviceSilence']).toEqual({
+        schedule: DEVICE_SILENCE_SCHEDULE,
+        handler: deviceSilenceHandler,
       });
     });
 

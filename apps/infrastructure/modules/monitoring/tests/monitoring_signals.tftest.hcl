@@ -493,3 +493,45 @@ run "no_heartbeat_metric_alert" {
     error_message = "alert_ids must list exactly the three platform metric alerts"
   }
 }
+
+# #231 — a device that goes silent during a cook. The API's deviceSilence timer
+# (apps/api/src/functions/devices/device-silence.ts) logs one line of counts
+# every 5 minutes to FunctionAppLogs; this rule fires when a line in the window
+# says silent= above 0. The marker and the field name are a contract with that
+# file: the API spec pins the line's format.
+run "device_silent_during_cook_log_alert" {
+  command = plan
+
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.name == "meatgeek-v2-dev-device-silent-during-cook"
+    error_message = "device_silent_during_cook name must be <prefix>-device-silent-during-cook"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.scopes == tolist([var.log_analytics_workspace_id])
+    error_message = "device_silent_during_cook must be scoped to the Log Analytics workspace id, and to nothing else"
+  }
+  assert {
+    condition     = strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).query, "FunctionAppLogs") && strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).query, "deviceSilence ") && strcontains(one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).query, "silent=")
+    error_message = "device_silent_during_cook query must read the deviceSilence line's silent= count from FunctionAppLogs"
+  }
+  assert {
+    condition     = one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).metric_measure_column == "SilentDevices" && one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).time_aggregation_method == "Maximum" && one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).operator == "GreaterThan" && one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.criteria).threshold == 0
+    error_message = "device_silent_during_cook criteria must be Maximum of SilentDevices / GreaterThan / 0"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.evaluation_frequency == "PT5M" && azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.window_duration == "PT10M"
+    error_message = "device_silent_during_cook must evaluate every PT5M over a PT10M window (two timer lines)"
+  }
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.severity == 2 && azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.auto_mitigation_enabled == true
+    error_message = "device_silent_during_cook must be severity 2 and stateful (one email when it fires, one when it resolves)"
+  }
+  assert {
+    condition     = length(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.action) == 1 && length(one(azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.action).action_groups) == 1
+    error_message = "device_silent_during_cook must notify exactly one action group"
+  }
+  assert {
+    condition     = contains(keys(output.log_alert_ids), "device_silent_during_cook")
+    error_message = "log_alert_ids must include device_silent_during_cook"
+  }
+}

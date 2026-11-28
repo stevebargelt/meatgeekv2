@@ -40,8 +40,9 @@ output "alert_ids" {
 output "log_alert_ids" {
   description = "Map of log search (scheduled query) alert IDs by alert shorthand"
   value = {
-    ingestion_cap_reached = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.id
-    ingestion_near_cap    = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.id
+    ingestion_cap_reached     = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_cap_reached.id
+    ingestion_near_cap        = azurerm_monitor_scheduled_query_rules_alert_v2.ingestion_near_cap.id
+    device_silent_during_cook = azurerm_monitor_scheduled_query_rules_alert_v2.device_silent_during_cook.id
   }
 }
 
