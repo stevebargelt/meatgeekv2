@@ -128,7 +128,10 @@ parse, no query, and no write.
   the IoT temperature-ingest path also spends against (see
   [`mg-53-cosmos-shared-throughput-destination`](mg-53-cosmos-shared-throughput-destination.md));
   offset pagination would re-charge every skipped document against that shared
-  pool.
+  pool. Later exception (#231): `listActiveCookDevices` reads the `deviceId` of
+  every `active` cook across partitions, every 5 minutes, for the
+  device-silence alert. Active cooks number a few at most, so the charge is
+  small; no user-facing route reads across partitions.
 - **`stopCook`** (`cooks-repository.ts:278`) is read-then-replace with an
   `If-Match` on the ETag the read returned. A 412 (another writer replaced the
   document between the read and the write) triggers a bounded re-read-and-retry

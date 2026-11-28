@@ -101,7 +101,7 @@ views {
       The API exports straight to Application Insights at a 0.5 sampling ratio. The Go
       services sample every span (`AlwaysSample`) and export OTLP/HTTP to the collector, which
       is off by default (`enable_native_otlp = false`); with no `OTEL_EXPORTER_OTLP_ENDPOINT`
-      they export nothing. Three metric alerts, two log search alerts and three activity-log
+      they export nothing. Three metric alerts, three log search alerts and three activity-log
       alerts notify one action group; the budgets email through their own `contact_emails`.
     '''
     include *

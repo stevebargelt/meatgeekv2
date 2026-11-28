@@ -122,8 +122,10 @@ export function toCook(document: StoredCook): Cook {
  * shared offer that the IoT temperature-ingest path also spends against. A
  * cross-partition scan — or offset pagination, which re-charges every skipped
  * document — could exhaust that shared pool. So `userId` is the partition axis,
- * never a caller-supplied filter, and there is no `ReadAll`/cross-partition path
- * anywhere in this file.
+ * never a caller-supplied filter, and no user-facing path reads across
+ * partitions. The one exception is `listActiveCookDevices` (#231), run only by
+ * the device-silence timer every 5 minutes: it projects `deviceId` from the
+ * `active` cooks alone, which number at most a few, so its charge stays small.
  *
  * `userId` is supplied by the caller (the handlers derive it from the
  * authenticated Easy Auth principal — MG-59 step 3); the repository never reads
@@ -729,7 +731,7 @@ export class CooksRepository {
    * #231 — the device of every `active` cook, across ALL users: the one
    * cross-partition query in this repository, run only by the device-silence
    * timer. It projects `deviceId` alone and excludes the MG-84 lock documents.
-   * Active cooks are few (one per device at most), so it reads them all.
+   * Active cooks are few (normally one per device), so it reads them all.
    * A device with two active cooks appears twice; the caller dedupes.
    */
   async listActiveCookDevices(): Promise<{ deviceIds: string[]; requestCharge: number }> {

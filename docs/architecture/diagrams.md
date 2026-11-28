@@ -233,9 +233,10 @@ identity (X.509 thumbprint)`" .-> Meatgeek.Cloud.Ingest.Iothub
   Meatgeek.Cloud.Observability.Workbook -. "`queries`" .-> Meatgeek.Cloud.Observability.Appinsights
   Meatgeek.Cloud.Observability.Collector -. "`native OTLP`" .-> Meatgeek.Cloud.Observability.Appinsights
   Meatgeek.Cloud.Observability.LogAlerts -. "`queries: ingestion-cap-
-reached, ingestion-near-cap`" .-> Meatgeek.Cloud.Observability.Logs
+reached, ingestion-near-cap,
+device-silent-during-cook`" .-> Meatgeek.Cloud.Observability.Logs
   Meatgeek.Cloud.Observability.MetricAlerts -. "`three metric alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
-  Meatgeek.Cloud.Observability.LogAlerts -. "`two log search alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
+  Meatgeek.Cloud.Observability.LogAlerts -. "`three log search alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Meatgeek.Cloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> Meatgeek.Cloud.Observability.ActionGroup
   Pitmaster -. "`cooks on`" .-> Smoker
   Delivery.Simdevice -. "`telemetry as <sim>, <sim>-chart,
@@ -332,9 +333,10 @@ identity (X.509 thumbprint)`" .-> MeatgeekCloud.Ingest.Iothub
   MeatgeekCloud.Observability.Workbook -. "`queries`" .-> MeatgeekCloud.Observability.Appinsights
   MeatgeekCloud.Observability.Collector -. "`native OTLP`" .-> MeatgeekCloud.Observability.Appinsights
   MeatgeekCloud.Observability.LogAlerts -. "`queries: ingestion-cap-
-reached, ingestion-near-cap`" .-> MeatgeekCloud.Observability.Logs
+reached, ingestion-near-cap,
+device-silent-during-cook`" .-> MeatgeekCloud.Observability.Logs
   MeatgeekCloud.Observability.MetricAlerts -. "`three metric alerts`" .-> MeatgeekCloud.Observability.ActionGroup
-  MeatgeekCloud.Observability.LogAlerts -. "`two log search alerts`" .-> MeatgeekCloud.Observability.ActionGroup
+  MeatgeekCloud.Observability.LogAlerts -. "`three log search alerts`" .-> MeatgeekCloud.Observability.ActionGroup
   MeatgeekCloud.Observability.ActivityAlerts -. "`three activity-log alerts`" .-> MeatgeekCloud.Observability.ActionGroup
   MeatgeekCloud.Api.Cooks -. "`cook_started, cook_stopped
 to the owning userId`" .-> MeatgeekCloud.Realtime
@@ -766,7 +768,7 @@ register it with simdevice`" .-> MeatgeekCloudIngest.Iothub
 The API exports straight to Application Insights at a 0.5 sampling ratio. The Go
 services sample every span (`AlwaysSample`) and export OTLP/HTTP to the collector, which
 is off by default (`enable_native_otlp = false`); with no `OTEL_EXPORTER_OTLP_ENDPOINT`
-they export nothing. Three metric alerts, two log search alerts and three activity-log
+they export nothing. Three metric alerts, three log search alerts and three activity-log
 alerts notify one action group; the budgets email through their own `contact_emails`.
 
 View `observability` on the site: https://stevebargelt.github.io/meatgeekv2/#/view/observability/
@@ -810,9 +812,10 @@ graph TB
   MeatgeekCloudObservability.Workbook -. "`queries`" .-> MeatgeekCloudObservability.Appinsights
   MeatgeekCloudObservability.Collector -. "`native OTLP`" .-> MeatgeekCloudObservability.Appinsights
   MeatgeekCloudObservability.LogAlerts -. "`queries: ingestion-cap-
-reached, ingestion-near-cap`" .-> MeatgeekCloudObservability.Logs
+reached, ingestion-near-cap,
+device-silent-during-cook`" .-> MeatgeekCloudObservability.Logs
   MeatgeekCloudObservability.MetricAlerts -. "`three metric alerts`" .-> MeatgeekCloudObservability.ActionGroup
-  MeatgeekCloudObservability.LogAlerts -. "`two log search alerts`" .-> MeatgeekCloudObservability.ActionGroup
+  MeatgeekCloudObservability.LogAlerts -. "`three log search alerts`" .-> MeatgeekCloudObservability.ActionGroup
   MeatgeekCloudObservability.ActivityAlerts -. "`three activity-log alerts`" .-> MeatgeekCloudObservability.ActionGroup
   MeatgeekCloudObservability.ActionGroup -. "`alert email`" .-> Operator
   MeatgeekCloudObservability.Budgets -. "`budget email (contact_emails)`" .-> Operator

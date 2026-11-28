@@ -2,8 +2,9 @@
  * MG-59 — the cooks data-access repository, tested with NO Azure and NO
  * credentials. The container is a fake that records exactly how it was
  * addressed, so these tests hold the throughput- and tenancy-critical
- * properties: every operation is single-partition on `/userId`, no
- * cross-partition scan is ever issued, pagination is continuation-token (never
+ * properties: every operation here is single-partition on `/userId`, no
+ * cross-partition scan is issued (the one cross-partition read, #231's
+ * `listActiveCookDevices`, is pinned in active-cook-devices.spec.ts), pagination is continuation-token (never
  * offset), the stop transition mutates the correctly-addressed document, and the
  * RU charge is read from the response for measurement.
  *

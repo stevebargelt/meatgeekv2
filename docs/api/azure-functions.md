@@ -42,6 +42,7 @@ yet wired.
 | `cosmosHealth`           | HTTP `GET`    | `health/cosmos`                   | MG-51 — probes the API's own path to Cosmos                   |
 | `apnsHealth`             | HTTP `GET`    | `health/apns`                     | #243 — signs a provider token through Key Vault and checks Apple accepts it |
 | `storageHeartbeat`       | **Timer**     | `0 */15 * * * *` (every 15 min)   | MG-58 — the host-storage proof path                           |
+| `deviceSilence`          | **Timer**     | `0 */5 * * * *` (every 5 min)     | #231 — counts active cooks' devices that went silent; the `device-silent-during-cook` alert reads its line |
 | `broadcastTemperature`   | **Event Hub** | `temperature-data`, many          | HAR-60 — pushes each reading to its device's owner            |
 | `recordTargetsReached`   | **Event Hub** | `temperature-data`, many          | Records on each running cook which targets are reached, and alerts the owner's phones (#244) |
 | `rollupTemperatures`     | **Cosmos DB** | `temperatures` change feed        | HAR-86 — folds readings into per-device, per-hour rollups     |

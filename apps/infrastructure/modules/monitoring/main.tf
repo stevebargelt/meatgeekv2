@@ -409,7 +409,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "device_silent_during_
   resource_group_name = var.resource_group_name
   location            = var.location
   scopes              = [var.log_analytics_workspace_id]
-  description         = "A device with an active cook has been disconnected from IoT Hub for 10 minutes or more, so the cook is getting no readings. Check the device: power, network, and the meatgeek-pusher service (systemctl status meatgeek-pusher). If the cook is over, stop it in the app; the alert resolves within 10 minutes. The deviceSilence line in FunctionAppLogs has the counts; GET /devices shows which device is disconnected."
+  description         = "A device with an active cook has been disconnected from IoT Hub for 10 minutes or more, so the cook is getting no readings. Check the device: power, network, and the meatgeek-pusher service (systemctl status meatgeek-pusher). If the cook is over, stop it in the app; the alert resolves after the next evaluations see silent=0 (up to about 30 minutes). The deviceSilence line in FunctionAppLogs has the counts; GET /devices shows which device is disconnected."
   severity            = 2
 
   evaluation_frequency    = "PT5M"

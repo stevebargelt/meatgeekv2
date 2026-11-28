@@ -476,7 +476,9 @@ model {
             ingestion-cap-reached fires when _LogOperation has an OverQuota row in 30 minutes,
             checked every 15 minutes. ingestion-near-cap fires when billable Usage over a trailing
             24 hours passes 80% of the daily cap (1600 MB in dev), checked hourly. The cap rule
-            was proven to fire on 2026-11-25 (HAR-179).
+            was proven to fire on 2026-11-25 (HAR-179). device-silent-during-cook (#231) fires
+            when the API's deviceSilence timer line in FunctionAppLogs shows silent= above 0 in
+            10 minutes, checked every 5 minutes; not yet shown to fire on dev.
           '''
         }
         activityAlerts = service 'Activity-log alerts' {
@@ -497,9 +499,9 @@ model {
         appinsights -> logs 'stores in'
         workbook -> appinsights 'queries'
         appinsights -> metricAlerts 'function-failure-rate'
-        logAlerts -> logs 'queries: ingestion-cap-reached, ingestion-near-cap'
+        logAlerts -> logs 'queries: ingestion-cap-reached, ingestion-near-cap, device-silent-during-cook'
         metricAlerts -> actionGroup 'three metric alerts'
-        logAlerts -> actionGroup 'two log search alerts'
+        logAlerts -> actionGroup 'three log search alerts'
         activityAlerts -> actionGroup 'three activity-log alerts'
       }
     }
