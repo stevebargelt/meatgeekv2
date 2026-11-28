@@ -267,13 +267,15 @@ cd apps/device-controller
 make dev                         # Run with debug flags
 make build                       # Build with debug symbols
 
-# Remote debugging on Raspberry Pi
+# Remote debugging on Raspberry Pi (onboarded with apps/data-pusher/deploy/onboard-pi.sh)
 ssh pi@your-device-ip
-sudo systemctl stop meatgeek-controller
-cd /home/pi
-make build                       # If Makefile deployed to Pi
-./MeatGeek-DeviceController --debug --mock-sensors=false
+sudo journalctl -u meatgeek-controller -f        # Follow the controller's logs
+sudo systemctl stop meatgeek-controller          # Or run it in the foreground instead,
+sudo -u meatgeek /usr/local/bin/meatgeek-controller   # as the user that may read SPI and I2C
+sudo systemctl start meatgeek-controller
 ```
+
+To put a new build on the Pi, see the [device runbook](../devices/runbook.md).
 
 ## Common Issues & Solutions
 

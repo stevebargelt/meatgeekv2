@@ -171,7 +171,7 @@ Each Go project (`device-controller` and `data-pusher`) uses a standard Makefile
 **Example Makefile** (`apps/device-controller/Makefile`):
 ```makefile
 # Variables
-BINARY_NAME=MeatGeek-DeviceController
+BINARY_NAME=meatgeek-controller
 GO_FILES=$(shell find . -name '*.go' -not -path "./vendor/*")
 
 # Build commands
@@ -221,7 +221,7 @@ BINARY_NAME=meatgeek-pusher
 SERVICE_NAME=meatgeek-pusher
 
 # Build commands  
-.PHONY: build build-arm test lint format clean dev install
+.PHONY: build build-arm test lint format clean dev deploy-to-pi
 
 build:
 	go build -o dist/$(BINARY_NAME) cmd/main.go
@@ -248,12 +248,11 @@ clean:
 dev:
 	go run cmd/main.go --device-url=http://localhost:3000 --debug=true
 
-# Install as systemd service (on Raspberry Pi)
-install:
-	sudo cp dist/$(BINARY_NAME) /usr/local/bin/
-	sudo cp $(SERVICE_NAME).service /etc/systemd/system/
-	sudo systemctl enable $(SERVICE_NAME)
-	sudo systemctl start $(SERVICE_NAME)
+# Onboard or update a Pi: builds both programs, installs them and their units
+# (see docs/devices/runbook.md). The device-controller Makefile has no deploy
+# target; this is the only way onto a Pi.
+deploy-to-pi:
+	deploy/onboard-pi.sh $(PI_HOST) $(ONBOARD_ARGS)
 ```
 
 #### NX Integration via project.json

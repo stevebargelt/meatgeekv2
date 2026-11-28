@@ -137,8 +137,10 @@ nx serve device-controller          # Calls: make dev (mock sensors)
 cd apps/device-controller
 make build                          # Local build
 make dev                            # Development server
-make deploy-to-pi PI_HOST=pi@192.168.1.100  # Deploy to Pi
 ```
+
+To get a build onto a Raspberry Pi, follow the [device runbook](docs/devices/runbook.md)
+(`apps/data-pusher/deploy/onboard-pi.sh`, or `make deploy-to-pi PI_HOST=pi@<lan ip>` in `apps/data-pusher`).
 
 ## 📖 Documentation
 

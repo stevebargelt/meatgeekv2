@@ -58,18 +58,6 @@
         "command": "make clean",
         "cwd": "apps/device-controller"
       }
-    },
-    "deploy": {
-      "executor": "nx:run-commands",
-      "options": {
-        "commands": [
-          "make build-arm",
-          "scp dist/MeatGeek-DeviceController-arm pi@{args.host}:~/MeatGeek-DeviceController",
-          "ssh pi@{args.host} 'sudo systemctl restart meatgeek-controller'"
-        ],
-        "parallel": false,
-        "cwd": "apps/device-controller"
-      }
     }
   },
   "tags": ["type:app", "platform:go", "scope:device"]
