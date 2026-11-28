@@ -641,12 +641,21 @@ resource "azapi_resource" "function_app_auth" {
 }
 
 # --- Identity-based access grants for the Function App managed identity ------
-# Deployment + host storage: the Flex runtime needs Blob (package deployment /
-# host) and Queue (triggers/scaling) data-plane access on ITS OWN storage
-# account. Scoped to the storage account only — least privilege. Storage Blob
-# Data Owner covers reading the deployment package from the blob container under
-# the app's managed identity (deployment storage authentication =
-# SystemAssignedIdentity).
+# Deployment + host storage: Storage Blob Data Owner on the app's OWN storage
+# account, scoped to that account only (least privilege). It covers reading the
+# deployment package from the blob container under the app's managed identity
+# (deployment storage authentication = SystemAssignedIdentity) and the host's
+# AzureWebJobsStorage connection. Microsoft documents this role as "the minimum
+# storage account permissions for the host-required AzureWebJobsStorage
+# connection", and as the host-storage role the Event Hubs and Timer triggers
+# need:
+# https://learn.microsoft.com/azure/azure-functions/manage-connections?pivots=functions-auth-identity&tabs=host#permissions
+#
+# There is deliberately NO queue role (#228). Per the same page, Storage Queue
+# Data Contributor is needed only by a Blob Storage trigger (poison-blob queue),
+# Queue storage bindings or Durable Functions. This app has none of them: its
+# triggers are HTTP, Event Hubs, Cosmos DB (leases live in Cosmos) and Timer.
+# Add the role back with the first such trigger or binding.
 #
 # principal_type is declared EXPLICITLY on every azurerm_role_assignment in this
 # stack — the MG-23 apply identity's ABAC condition matches on PrincipalType, and
@@ -656,13 +665,6 @@ resource "azapi_resource" "function_app_auth" {
 resource "azurerm_role_assignment" "functions_storage_blob" {
   scope                = azapi_resource.functions_storage.id
   role_definition_name = "Storage Blob Data Owner"
-  principal_id         = azapi_resource.function_app.identity[0].principal_id
-  principal_type       = "ServicePrincipal"
-}
-
-resource "azurerm_role_assignment" "functions_storage_queue" {
-  scope                = azapi_resource.functions_storage.id
-  role_definition_name = "Storage Queue Data Contributor"
   principal_id         = azapi_resource.function_app.identity[0].principal_id
   principal_type       = "ServicePrincipal"
 }

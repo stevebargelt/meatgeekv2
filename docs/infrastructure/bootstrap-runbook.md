@@ -120,8 +120,10 @@ no-shared-key posture (MG-24 point 5) is preserved. Three DISTINCT principals to
 the deployment blob container, each least-privilege:
 
 - **Function App managed identity** — reads the deployment package at runtime.
-  Terraform grants it `Storage Blob Data Owner` + `Storage Queue Data Contributor`
-  on the functions storage account (same apply that creates the app).
+  Terraform grants it `Storage Blob Data Owner` on the functions storage account
+  (same apply that creates the app). It holds no queue role: Microsoft documents
+  Blob Data Owner as the host's minimum, and queue access only for Blob triggers,
+  Queue bindings and Durable Functions, none of which the app uses (#228).
 - **App-deploy principal** (`var.app_deploy_principal_object_id`) — **writes** the
   package ZIP during Flex OneDeploy. Terraform grants it a **`Storage Blob Data
 Contributor` role on the `deployment-package` container** (in ADDITION to its
