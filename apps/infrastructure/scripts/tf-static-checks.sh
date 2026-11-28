@@ -252,6 +252,17 @@
 #      that a pair genuinely left the tree — deleting a resource, or moving one
 #      onto a computed reference. Re-baselining it to silence a red check is the
 #      failure mode, not the fix.
+#      AN `.id` REFERENCE ON AN ARGUMENT THE PINNED PROVIDER DOES NOT ForceNew
+#      (#227). An id reference goes unknown when its parent is replaced, so the
+#      child's config changes — but the child is only REPLACED if that argument
+#      is ForceNew. Otherwise Terraform plans an in-place UPDATE of a child Azure
+#      has already destroyed with its parent. azurerm 4.x keeps its v5 id-form
+#      arguments Optional + Computed and NOT ForceNew (ForceNew arrives only with
+#      the v5 schema), so moving a child off its parent's `.name` onto its `.id`
+#      takes it out of the name scan above without making its trigger optional.
+#      NON_FORCENEW_ID_ARGS lists each such `<resource type>:<argument>`; a child
+#      that sets one to `<parent>.id` must still carry `<parent>.id` in its
+#      replace_triggered_by. These pairs have their own floor and fail closed.
 #  19. THE CROSS-MODULE COSMOS TARGET CONTRACT IS BROKEN (MG-48). The MECHANISM
 #      this whole ticket turns on, asserted EXPLICITLY by address because check 18
 #      structurally cannot see it. 18 discovers a child that reaches a parent
@@ -1253,7 +1264,7 @@ check "IoT Hub routes are replaced with their endpoints (replace_triggered_by pa
 # tab, so an empty field would silently shift the next one into its place and the
 # pairing would end up checking itself.
 name_ref_child_blocks() {
-  awk -v f="$1" '
+  awk -v f="$1" -v nfargs="${NON_FORCENEW_ID_ARGS}" '
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
     function dash(s) { s = trim(s); return (s == "" ? "-" : s) }
     # Collect every configured-name reference carried by a value, wherever it sits
@@ -1296,10 +1307,21 @@ name_ref_child_blocks() {
     # question, which applies to EVERY such list in the tree — a bare
     # whole-resource trigger is an update-fires hazard whether or not the resource
     # carrying it also has a name-referenced parent).
+    # An id-form parent reference on an argument the pinned provider does not
+    # ForceNew (see NON_FORCENEW_ID_ARGS): `<arg> = <type>.<label>.id`, bare, on a
+    # resource whose type is listed with that argument. Each hit is recorded as
+    # `<arg>=<parent address>`, so a failure names the argument that matched.
+    function scan_nf_ids(s,   arg, addr) {
+      if (s !~ /^[[:space:]]*[a-z][a-z0-9_]*[[:space:]]*=[[:space:]]*[a-z][a-z0-9_]*\.[A-Za-z0-9_]+\.id[[:space:]]*$/) return
+      arg = s; sub(/^[[:space:]]+/, "", arg); sub(/[[:space:]]*=.*$/, "", arg)
+      if (index(" " nfargs " ", " " rtype ":" arg " ") == 0) return
+      addr = s; sub(/^[^=]*=[[:space:]]*/, "", addr); sub(/\.id[[:space:]]*$/, "", addr)
+      if (index(" " nfparents " ", " " arg "=" addr " ") == 0) nfparents = nfparents " " arg "=" addr
+    }
     function emit() {
-      if (label != "" && (trim(parents) != "" || trim(rtb) != ""))
-        printf "%s\t%d\t%s\t%s\t%s\n", f, startline, label, dash(parents), dash(rtb)
-      label = ""; parents = ""; rtb = ""; inres = 0; inrtb = 0
+      if (label != "" && (trim(parents) != "" || trim(nfparents) != "" || trim(rtb) != ""))
+        printf "%s\t%d\t%s\t%s\t%s\t%s\n", f, startline, label, dash(parents), dash(nfparents), dash(rtb)
+      label = ""; parents = ""; nfparents = ""; rtb = ""; inres = 0; inrtb = 0
     }
     { line = $0; sub(/#.*$/, "", line) }
     line ~ /^[[:space:]]*resource[[:space:]]+"[a-z][a-z0-9_]*"[[:space:]]+"/ {
@@ -1309,6 +1331,7 @@ name_ref_child_blocks() {
       sub(/^[[:space:]]*resource[[:space:]]+"/, "", label)
       sub(/"[[:space:]]+"/, ".", label)
       sub(/".*$/, "", label)
+      rtype = label; sub(/\..*$/, "", rtype)
       next
     }
     inres == 0 { next }
@@ -1319,10 +1342,19 @@ name_ref_child_blocks() {
     line ~ /^\}/ { emit(); next }
     # Every remaining line inside the block is a value-bearing line, including the
     # continuation lines of a multi-line list, so all of them are scanned.
-    { scan_names(line) }
+    { scan_names(line); scan_nf_ids(line) }
     END { emit() }
   ' "$1"
 }
+
+# `<resource type>:<argument>` pairs whose id-form parent argument the PINNED
+# azurerm (~> 4.0, locked 4.81.0) does NOT mark ForceNew. Read from the provider
+# source, internal/services/eventhub/eventhub_resource.go at v4.81.0: under
+# `!features.FivePointOh()` namespace_id is Optional + Computed with no ForceNew;
+# the ForceNew it carries in the base schema applies only to v5. Re-read this list
+# on the deliberate v5 upgrade: each entry whose argument becomes ForceNew can be
+# removed together with the trigger that compensates for it.
+NON_FORCENEW_ID_ARGS="azurerm_eventhub:namespace_id"
 
 name_ref_records=""
 while IFS= read -r tf_file; do
@@ -1372,18 +1404,36 @@ name_ref_records="$(printf '%s' "${name_ref_records}" | grep -v '^$' || true)"
 # The target rule added azurerm_eventhub_consumer_group.api_targets beside
 # api_broadcast, with the same two name-referenced parents and the same `.id`
 # triggers. That raises the floor by 2, from 26 to 28.
-NAME_REF_PAIR_FLOOR=28
+#
+# #227 moved azurerm_eventhub.temperature_data off the deprecated
+# `namespace_name = azurerm_eventhub_namespace.main.name` (and
+# `resource_group_name`) onto `namespace_id = azurerm_eventhub_namespace.main.id`.
+# That one pair (temperature_data -> eventhub_namespace.main) is no longer a
+# configured-name reference, so the floor drops by exactly 1, from 28 to 27. It
+# was the only pair with an id-form replacement in azurerm 4.81.0: the dev apply
+# warned on nothing else, and every other name-form parent argument here
+# (iothub_name, eventhub_name, the consumer groups' namespace_name, entity_path,
+# endpoint_uri, endpoint_names) has no id form in the pinned provider. The pair is
+# still policed, by the non-ForceNew id half below, because namespace_id is not
+# ForceNew in 4.x and the Event Hub's trigger therefore stays.
+NAME_REF_PAIR_FLOOR=27
+
+# The non-ForceNew id pairs discovered in the committed tree (one:
+# azurerm_eventhub.temperature_data -> azurerm_eventhub_namespace.main). Same
+# ratchet rules as NAME_REF_PAIR_FLOOR.
+NONFORCENEW_ID_PAIR_FLOOR=1
 
 name_replace_hits=""
 name_ref_pairs=0
 name_ref_children=0
 name_ref_lists=0
+nf_id_pairs=0
 # A here-string over empty records yields one empty line, which the guard below
 # skips — so the loop is unconditional and the fail-closed test is on the PAIR
 # COUNT rather than on the record list. That distinction matters now that a block
 # can be recorded for its replace_triggered_by alone: a tree with lists but no
 # discovered pairs must still fail closed.
-while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
+while IFS=$'\t' read -r n_file n_line n_child n_parents n_nfparents n_rtb; do
   [[ -n "${n_child}" ]] || continue
   # Only `<parent>.id` counts as a trigger. A bare whole-resource entry is
   # reported on its own terms below and deliberately NOT accepted as a pairing:
@@ -1401,6 +1451,17 @@ while IFS=$'\t' read -r n_file n_line n_child n_parents n_rtb; do
     [[ -n "${n_bare}" ]] || continue
     name_replace_hits+="${n_file}:${n_line}: ${n_child}'s replace_triggered_by names the whole resource ${n_bare} instead of ${n_bare}.id — a BARE whole-resource trigger also fires when that parent is planned for an in-place UPDATE, so an ordinary tag / sku / policy edit on ${n_bare} would DESTROY AND RECREATE ${n_child} (on a Cosmos database or container that is every stored document; on an IoT Hub route or consumer group it is a routing gap and a trigger rebind). That is strictly worse than the orphaning replace_triggered_by is here to prevent. Name the parent's identity instead: ${n_bare}.id is unknown at plan time when ${n_bare} is REPLACED, so the trigger still fires, and byte-identical across an in-place edit, so it stays quiet (MG-48 F4)"$'\n'
   done <<< "${rtb_bare}"
+  if [[ "${n_nfparents}" != "-" ]]; then
+    for n_nfref in ${n_nfparents}; do
+      # Each token is `<argument>=<parent address>` (see scan_nf_ids).
+      n_nfarg="${n_nfref%%=*}"
+      n_nfparent="${n_nfref#*=}"
+      nf_id_pairs=$((nf_id_pairs + 1))
+      if ! grep -qxF "${n_nfparent}" <<< "${rtb_ids}" && ! grep -qxF "${n_nfparent}" <<< "${rtb_bare}"; then
+        name_replace_hits+="${n_file}:${n_line}: ${n_child} sets ${n_nfarg} = ${n_nfparent}.id but declares no lifecycle { replace_triggered_by = [${n_nfparent}.id] } — an id reference goes unknown when ${n_nfparent} is replaced, but the pinned azurerm 4.x does not mark that argument ForceNew, so Terraform plans an in-place UPDATE of a ${n_child} Azure has already destroyed with its parent rather than a replacement. Keep the trigger until the deliberate v5 upgrade makes the argument ForceNew (#227; see NON_FORCENEW_ID_ARGS)"$'\n'
+      fi
+    done
+  fi
   [[ "${n_parents}" != "-" ]] || continue
   name_ref_children=$((name_ref_children + 1))
   for n_parent in ${n_parents}; do
@@ -1436,9 +1497,16 @@ if [[ "${name_ref_pairs}" -eq 0 ]]; then
 elif [[ "${name_ref_pairs}" -lt "${NAME_REF_PAIR_FLOOR}" ]]; then
   name_replace_hits+="this scan discovered ${name_ref_pairs} name-referenced (child, parent) pair(s), below the recorded floor of ${NAME_REF_PAIR_FLOOR} — THE SCAN HAS NARROWED and must be re-examined before this number is touched. A zero test alone would have passed this: nineteen of twenty pairs can stop being discovered while one still is, and every child that dropped out is then unguarded with the check still green. Find out WHY the count fell first. If a discovery regex, the block-boundary assumption or the exclusion boundary was edited, that edit is the defect — fix it, do not lower the floor to match it. Only lower NAME_REF_PAIR_FLOOR (in this script, next to its definition) when the tree genuinely lost a pair — a resource deleted, or one moved off a configured-name reference onto a computed one — and say which pair and why in the commit message. Re-baselining this casually converts the guard back into the fail-open scan it was written to replace"$'\n'
 fi
+if [[ -n "${NON_FORCENEW_ID_ARGS// /}" && "${nf_id_pairs}" -eq 0 ]]; then
+  # Fail closed whatever the floor says: while NON_FORCENEW_ID_ARGS lists an
+  # argument, finding no child that sets it means the scan stopped working.
+  name_replace_hits+="no '<arg> = <type>.<label>.id' reference for any NON_FORCENEW_ID_ARGS entry (${NON_FORCENEW_ID_ARGS}) found in any resource block under ${INFRA_DIR} — the non-ForceNew id half of this check has stopped working (it must never pass by finding nothing). Its discovery matches only a bare single-line \`<arg> = <type>.<label>.id\`; if the reference was rewritten (interpolated, wrapped, moved), widen the scan. If the listed argument genuinely left the tree, remove its entry from NON_FORCENEW_ID_ARGS (#227)"$'\n'
+elif [[ "${nf_id_pairs}" -lt "${NONFORCENEW_ID_PAIR_FLOOR}" ]]; then
+  name_replace_hits+="this scan discovered ${nf_id_pairs} non-ForceNew id (child, parent) pair(s) from NON_FORCENEW_ID_ARGS, below the recorded floor of ${NONFORCENEW_ID_PAIR_FLOOR} — THE SCAN HAS NARROWED or a listed child moved. Find out WHY the count fell first: if scan_nf_ids or the block-boundary assumption was edited, that edit is the defect — fix it, do not lower the floor to match it. Only lower NONFORCENEW_ID_PAIR_FLOOR (next to its definition) when the tree genuinely lost a pair — a resource deleted, or its argument made ForceNew by a provider upgrade — and say which pair and why in the commit message (#227)"$'\n'
+fi
 # Print the discovered size so a pass is demonstrably non-vacuous rather than a
 # scan that quietly matched nothing.
-echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) (floor ${NAME_REF_PAIR_FLOOR}) across ${name_ref_children} child resource(s); inspected ${name_ref_lists} replace_triggered_by list(s) for the attribute form"
+echo "  check 18: discovered ${name_ref_pairs} name-referenced (child, parent) pair(s) (floor ${NAME_REF_PAIR_FLOOR}) across ${name_ref_children} child resource(s); inspected ${name_ref_lists} replace_triggered_by list(s) for the attribute form; ${nf_id_pairs} non-ForceNew id pair(s) (floor ${NONFORCENEW_ID_PAIR_FLOOR})"
 check "children reached by a parent's configured name are replaced with it (replace_triggered_by pairing)" "${name_replace_hits%$'\n'}"
 
 # --- CHECK 19. The cross-module Cosmos target contract, by address (MG-48) ---------

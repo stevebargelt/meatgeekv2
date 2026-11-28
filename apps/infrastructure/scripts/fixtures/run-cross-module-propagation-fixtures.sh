@@ -159,6 +159,20 @@ mutate_case() {
       # so nothing here goes stale when the module grows and the floor is raised.
       replace_all "${cosmos_file}" 'database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.name' 'database_name       = azurerm_cosmosdb_sql_database.meatgeek_shared.id'
       ;;
+    missing-eventhub-namespace-lifecycle)
+      # #227 moved the Event Hub onto namespace_id, so check 18's name discovery no
+      # longer sees this pair. azurerm 4.x does not mark namespace_id ForceNew, so
+      # the trigger is still what replaces the Event Hub with its namespace; the
+      # non-ForceNew id half of check 18 must catch its removal.
+      replace_once_in_resource "${iothub_file}" azurerm_eventhub temperature_data $'  lifecycle {\n    replace_triggered_by = [azurerm_eventhub_namespace.main.id]\n  }' ''
+      ;;
+    nonforcenew-id-scan-narrowed)
+      # The same reference, rewritten so check 18's non-ForceNew id discovery no
+      # longer matches it (it matches only a bare `<arg> = <type>.<label>.id`).
+      # That half must fail closed on finding nothing, not pass with the pair
+      # silently unpoliced.
+      replace_once "${iothub_file}" 'namespace_id      = azurerm_eventhub_namespace.main.id' 'namespace_id      = "${azurerm_eventhub_namespace.main.id}"'
+      ;;
     missing-cosmos-endpoint-lifecycle)
       replace_once "${iothub_file}" $'  lifecycle {\n    replace_triggered_by = [terraform_data.cosmos_target_ready.id]\n  }' ''
       ;;
@@ -237,11 +251,13 @@ run_case wrong-parent 'its replace_triggered_by names azurerm_iothub.main.id ins
 run_case bare-parent 'replace_triggered_by names the whole resource azurerm_cosmosdb_account.main instead of azurerm_cosmosdb_account.main.id'
 run_case no-discovered-pairs "this check has stopped working (it must never pass by finding nothing)"
 run_case below-pair-floor "${BELOW_FLOOR_EXPECTED}"
+run_case missing-eventhub-namespace-lifecycle 'azurerm_eventhub.temperature_data sets namespace_id = azurerm_eventhub_namespace.main.id but declares no lifecycle { replace_triggered_by = [azurerm_eventhub_namespace.main.id] }'
+run_case nonforcenew-id-scan-narrowed 'the non-ForceNew id half of this check has stopped working'
 run_case missing-cosmos-endpoint-lifecycle 'azurerm_iothub_endpoint_cosmosdb_account.cosmos_storage declares no lifecycle { replace_triggered_by = [terraform_data.cosmos_target_ready.id] }'
 run_case missing-cosmos-triggers-replace 'terraform_data.cosmos_target_ready declares no triggers_replace'
 
-if [ "${checks}" -ne 8 ]; then
-  echo "run-cross-module-propagation-fixtures: FAILED — ran ${checks} checks, expected 8; a case was dropped." >&2
+if [ "${checks}" -ne 10 ]; then
+  echo "run-cross-module-propagation-fixtures: FAILED — ran ${checks} checks, expected 10; a case was dropped." >&2
   exit 1
 fi
 if [ "${failures}" -ne 0 ]; then

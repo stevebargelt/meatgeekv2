@@ -4,9 +4,11 @@
 # standalone `terraform init` in this module resolves the LATEST azurerm — which
 # on 2026-08-03 became v5.0.1, whose breaking azurerm_eventhub schema
 # (namespace_id replacing namespace_name/resource_group_name) failed every
-# `terraform test` run in CI with nothing in this repo having changed. This
-# codebase is written against azurerm 4.x; v5 is a deliberate, separate
-# migration.
+# `terraform test` run in CI with nothing in this repo having changed. The Event
+# Hub has since moved to namespace_id (#227), but that does not make this module
+# v5-ready, and the pin STAYS until a deliberate v5 upgrade: v5 changes other
+# schemas too, and it is also where namespace_id becomes ForceNew, which is the
+# point at which the Event Hub's replace_triggered_by can be reconsidered.
 terraform {
   required_providers {
     azurerm = {
@@ -35,7 +37,6 @@ terraform {
 #
 # CONFIGURED-NAME references — ordering only, so every child listed here carries
 # an explicit replace_triggered_by naming that parent's `.id`:
-#   azurerm_eventhub.temperature_data          -> eventhub_namespace.main  (namespace_name)
 #   ..._endpoint_eventhub.eventhub_realtime    -> eventhub_namespace.main  (endpoint_uri, interpolated)
 #   ..._endpoint_eventhub.eventhub_realtime    -> eventhub.temperature_data (entity_path)
 #   azurerm_iothub_route.cosmos                -> iothub.main              (iothub_name)
@@ -48,6 +49,10 @@ terraform {
 #   azurerm_eventhub_consumer_group.api_broadcast -> eventhub.temperature_data (eventhub_name)
 #   azurerm_eventhub_consumer_group.api_targets -> eventhub_namespace.main (namespace_name)
 #   azurerm_eventhub_consumer_group.api_targets -> eventhub.temperature_data (eventhub_name)
+#
+# COMPUTED reference on an argument the pinned provider does NOT ForceNew — so
+# it carries a CHANGE, not a replacement, and keeps its replace_triggered_by:
+#   azurerm_eventhub.temperature_data          -> eventhub_namespace.main  (namespace_id; #227)
 #
 # COMPUTED references — these carry replacement natively. No lifecycle block is
 # needed and adding one would be noise, not safety:
@@ -161,21 +166,21 @@ resource "azurerm_eventhub_namespace" "main" {
 
 # Event Hub for temperature data
 resource "azurerm_eventhub" "temperature_data" {
-  name                = "temperature-data"
-  namespace_name      = azurerm_eventhub_namespace.main.name
-  resource_group_name = var.resource_group_name
-  partition_count     = 2
-  message_retention   = 1
+  name              = "temperature-data"
+  namespace_id      = azurerm_eventhub_namespace.main.id
+  partition_count   = 2
+  message_retention = 1
 
-  # NOT redundant with the namespace_name reference above — do not delete this.
-  # `azurerm_eventhub_namespace.main.name` is the namespace's CONFIGURED name:
-  # identical before and after the namespace is replaced, so the reference carries
-  # ORDERING but never REPLACEMENT. Terraform would leave this Event Hub unplanned
-  # while Azure destroyed it along with its parent namespace, and state would keep
-  # listing an entity that no longer exists — the same class of defect that
-  # orphaned the Cosmos database and its containers on 2026-08-06 (MG-48). A
-  # reference to a parent's COMPUTED attribute (`.id`) carries replacement; a
-  # reference to its configured `name` does not.
+  # NOT redundant with the namespace_id reference above — do not delete this.
+  # namespace_id replaced the deprecated namespace_name + resource_group_name pair
+  # (#227), and as an `.id` it does go unknown when the namespace is replaced. But
+  # in the pinned azurerm 4.x it is Optional + Computed and NOT ForceNew (the
+  # ForceNew in the provider's base schema applies only to v5), so on its own it
+  # would plan this Event Hub for an in-place UPDATE after Azure had destroyed it
+  # with its namespace — the MG-48 defect class (state listing an entity that no
+  # longer exists) in a new shape. The trigger is what makes it a replacement.
+  # Revisit on the deliberate v5 upgrade; static check 18 polices this pair via
+  # NON_FORCENEW_ID_ARGS until then.
   #
   # The trigger names the namespace's `.id`, not the namespace. The bare form also
   # fires on the namespace being UPDATED IN PLACE (measured — see the module
