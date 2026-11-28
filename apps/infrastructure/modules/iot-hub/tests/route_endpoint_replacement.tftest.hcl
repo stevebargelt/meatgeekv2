@@ -124,8 +124,4 @@ run "eventhub_endpoint_reaches_its_parents_through_static_literal_names" {
     error_message = "the Event Hub endpoint's endpoint_uri must be built from azurerm_eventhub_namespace.main's configured name — an interpolated name is still a configured literal, so this reference is the second parent pairing the endpoint's replace_triggered_by must name; a scan keyed on bare `<type>.<label>.name` references would miss it entirely"
   }
 
-  assert {
-    condition     = azurerm_eventhub.temperature_data.namespace_name == azurerm_eventhub_namespace.main.name
-    error_message = "the Event Hub must sit in azurerm_eventhub_namespace.main and reach it by configured name — this is the pairing azurerm_eventhub.temperature_data's own replace_triggered_by must name, and the reason the endpoint above needs the namespace in its list too"
-  }
 }

@@ -348,6 +348,14 @@ whose result depends on the registry clock is not a gate. The stack stays on
 **azurerm 4.x** deliberately; moving to v5 is separate, deliberate work, not
 something a fresh `init` gets to decide.
 
+`azurerm_eventhub.temperature_data` now uses `namespace_id` (#227), the only
+deprecated name-form parent argument the dev apply warned about, so the module
+no longer leans on what v5 removes there. **The pin stays until a deliberate v5
+upgrade** all the same: v5 changes other schemas, and in 4.x `namespace_id` is
+not ForceNew (only v5 makes it so), which is why the Event Hub keeps its
+`replace_triggered_by` on the namespace and why `tf-static-checks.sh` check 18
+lists it in `NON_FORCENEW_ID_ARGS`. Revisit both on that upgrade.
+
 **Adding a `*.tftest.hcl` to a module makes it CI-invoked, and that carries an
 obligation.** `tf-static-checks.sh` **check 16** fails the build when a
 test-bearing module has no committed `.terraform.lock.hcl`, has one that exists
