@@ -141,7 +141,8 @@ test target, the stub UI tests included. Nothing waits on it.
 
 Not started by a merge: `infra-deploy-prod.yml` (manual, plan only), `ios-live-proof.yml` (daily at 09:17 UTC and on
 demand), `test-repeat.yml` (nightly at 07:17 UTC on what changed since its last run, every suite on Sundays, and on
-demand; a failing suite opens a `needs-triage` issue).
+demand; a failing suite opens a `needs-triage` issue), `infra-dev-apply-watch.yml` (every 6 hours and on demand; goes
+red when a green `main` SHA has been left unapplied to dev for over 2 hours; see [MG-38](docs/infrastructure/mg23-live-acceptance.md#mg-38--a-superseded-skip-behind-a-red-ci-stalls-reconciliation-silently)).
 
 ## Agent skills
 

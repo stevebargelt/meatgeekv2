@@ -82,6 +82,7 @@ const FIXTURE_RUNNERS = [
   'run-collect-live-shared-throughput-fixtures.sh',
   'run-cross-module-propagation-fixtures.sh',
   'run-destroy-guard-fixtures.sh',
+  'run-dev-apply-lag-fixtures.sh',
   'run-flex-secret-gate-fixtures.sh',
   'run-iothub-cosmos-partition-key-fixtures.sh',
   'run-live-host-storage-fixtures.sh',

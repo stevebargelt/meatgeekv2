@@ -41,7 +41,7 @@ an outcome is exactly how a security control ends up decorative.
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) → `validate-infrastructure`                | The **only** infrastructure job reachable from a pull request, and it is **CREDENTIALLESS**: `permissions: contents: read` only (no `id-token: write`), no `environment:`, no `azure/login`, no client/subscription id, and an `env:` block pinning `ARM_USE_OIDC` / `ARM_USE_CLI` / `ARM_USE_MSI` / `ARM_USE_AKS_WORKLOAD_IDENTITY` to `'false'`. Runs `assert-credentialless.sh` → `terraform fmt -check -recursive` → `terraform init -backend=false -input=false -lockfile=readonly` → `terraform validate` → `terraform test` (root) → `tf-static-checks.sh` → `bootstrap.test.sh` → destroy-guard fixtures → per-module `terraform test` (`modules/functions`, `modules/iot-hub`, `modules/monitoring`) → OTel config validate. It never reaches `tfstate-dev`.       |
 | [`.github/workflows/infra-apply-dev.yml`](../../.github/workflows/infra-apply-dev.yml)                  | The automatic post-merge apply: checkout the exact CI'd SHA → OIDC login → non-interactive `init` → `plan -out` → secret gate → destroy circuit-breaker → apply **that saved plan** → post-apply state gate (**always-run, not success-gated** — see [§9.4](#94-reading-a-failed-or-partial-apply)) → final drift plan that **fails on drift**.                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | [`bootstrap.sh`](../../apps/infrastructure/bootstrap/bootstrap.sh) → `bootstrap_infra_apply_identity()` | Creates the dev infra-apply SP: RG-scoped Contributor, **conditioned** RBAC Administrator, container-scoped state role. OIDC only, no secret.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)    | Single source of truth for the 10 Terraform-managed role definitions. Read by bootstrap (to build the condition) **and** by CI check 13 (to diff against the graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| [`tf-managed-role-allowlist.tsv`](../../apps/infrastructure/bootstrap/tf-managed-role-allowlist.tsv)    | Single source of truth for the 10 Terraform-managed role definitions. Read by bootstrap (to build the condition) **and** by CI check 13 (to diff against the graph).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | [`tf-plan-secret-inspection.sh`](../../apps/infrastructure/scripts/tf-plan-secret-inspection.sh)        | Fail-closed credential-value gate. Now an **executed** gate in both workflows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | [`tf-plan-destroy-guard.sh`](../../apps/infrastructure/scripts/tf-plan-destroy-guard.sh)                | Fail-closed destructive-change circuit-breaker. Fails on **any** `delete` (including replacements, and each _deposed_ object individually) and any `forget` (a `removed { destroy = false }` block, which orphans a live resource out of Terraform management) — unless `TF_DESTROY_GUARD_AUTHORIZED_CHANGES` names the exact SET of **action-qualified tokens** reviewed. A count is not an authorization (the same count is met by a different set), and neither is a bare address (`delete:X` and `forget:X` are different decisions). An action verb **outside the modeled set** (`no-op`, `create`, `read`, `update`, `delete`, `forget`) also fails — and is **not** clearable by any override, in either direction; see [§12](#the-recovery-path-workflow_dispatch). |
 | [`modules/monitoring`](../../apps/infrastructure/modules/monitoring/main.tf) activity-log alerts        | Detective controls on `roleAssignments/write`, `userAssignedIdentities/write`, `sqlRoleAssignments/write`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -69,7 +69,7 @@ infrastructure with no human in the loop.
 | 3   | **DECOMMISSION the retired dev plan identity and its GitHub Environment** — code removal does not remove live objects                                                                                                                                                                                                        | Operator workstation (`az` + `gh`)                                           | §3           |
 | 3b  | Settle the remaining **GitHub Environments** and their protection rules, and set the environment variables bootstrap emitted                                                                                                                                                                                                 | GitHub UI / `gh`                                                             | §2           |
 | 4   | **State migration — reconcile dev state with the MG-23 graph:** `terraform state rm` the de-scoped resource (Class 1), and settle whether the newly-declared ForceNew `principal_type` replaces the nine role assignments (Class 2). Unsettled, the first plan carries DESTROYS and the circuit-breaker deadlocks activation | Operator workstation, against live dev state                                 | Step 4 below |
-| 5   | Run the **blocking pre-activation checks B1–B10**                                                                                                                                                                                                                                                                             | Live tenant + GitHub                                                         | §5           |
+| 5   | Run the **blocking pre-activation checks B1–B10**                                                                                                                                                                                                                                                                            | Live tenant + GitHub                                                         | §5           |
 | 6   | Run the **live acceptance tests T1–T7** as the apply SP                                                                                                                                                                                                                                                                      | Live tenant, via GitHub Actions (§6)                                         | §7           |
 | 7   | **Tighten branch protection on `main`** (B7)                                                                                                                                                                                                                                                                                 | GitHub                                                                       | §5           |
 | 8   | Set **`DEV_TF_BACKEND_READY=true`** as a **repository** variable                                                                                                                                                                                                                                                             | GitHub                                                                       | §8           |
@@ -205,7 +205,7 @@ diff "$SRC" "$OUT" || true                      # `|| true`: differing files are
 ```
 
 **Read that diff before overwriting anything.** Every changed line must be a
-`PENDING` → GUID substitution and nothing else; a changed *role name* means the
+`PENDING` → GUID substitution and nothing else; a changed _role name_ means the
 loop above matched something you did not intend, and this file is what authors
 the ABAC condition. The overwrite is a **separate** command for that reason —
 "review every line before overwriting" is not a control-flow construct, and a
@@ -894,7 +894,7 @@ scratch workflow.** It needs the repository's live sub-claim prefix, so paste
 **both** helpers — `oidc_assert_subject_prefix` and `oidc_subject_prefix` — from
 [B10](#b10--do-the-live-federated-subjects-match-the-prefix-the-repo-actually-presents)
 into the shell first. The same fail-closed read, for a sharper version of the
-same reason: this path does not merely *compare* against the prefix, it
+same reason: this path does not merely _compare_ against the prefix, it
 **creates a credential from it**. A prefix that named another repository would
 federate the apply identity — `Contributor` on the dev RG — to that
 repository's workflows, so the value must come back proven, not just read.
@@ -1291,7 +1291,7 @@ gh api "repos/$REPO/environments/development-infra-apply-recovery/deployment-bra
   deliberately clicked", not "a second person exists".
 - **Branch B — either reported `UNVERIFIED` or `UNPROTECTED`** (`gh` stopped
   working part-way through the run, or a PUT failed — a `gh` that was
-  unauthenticated at the *start* aborts the run before this point, see step 1):
+  unauthenticated at the _start_ aborts the run before this point, see step 1):
   bootstrap prints a blocking banner with the exact `gh api` commands. Run them,
   then re-run the verification above. `UNVERIFIED` is **not** a pass — it means
   nobody has looked.
@@ -1332,7 +1332,7 @@ gh api "repos/$REPO/actions/oidc/customization/sub"
 **Resolve the prefix the way `bootstrap.sh` does — fail-closed.** A one-liner
 that defaults to `repo:$REPO` whenever the read does not produce a prefix is
 **wrong in the unsafe direction**: it defaults on a 403, a rate limit, an expired
-token, a proxy error page — every case that says *nothing* about this
+token, a proxy error page — every case that says _nothing_ about this
 repository's configuration — and then reports MISMATCH against a subject the
 repo never presents, which is an invitation to "correct" three healthy live
 credentials into the MG-42 outage. `resolve_oidc_subject_prefix()` treats
@@ -1340,7 +1340,7 @@ credentials into the MG-42 outage. `resolve_oidc_subject_prefix()` treats
 proven `gh` session) and aborts on all the rest.
 
 **Reading the response is only half of it.** Bootstrap never assigns
-`OIDC_SUBJECT_PREFIX` from a value it has merely *classified*: every candidate —
+`OIDC_SUBJECT_PREFIX` from a value it has merely _classified_: every candidate —
 the API's `sub_claim_prefix` **and** the default it falls back to — goes through
 `assert_oidc_subject_prefix()`, which proves the string structurally names the
 committed `GITHUB_REPO` before it can become a trust binding. An authenticated
@@ -1548,7 +1548,7 @@ check meatgeek-v2-github-oidc        github-production                         p
   — then re-run the resolver. `DEV_TF_BACKEND_READY` stays unset until B10 has
   actually produced three `MATCH`es.
   - **`OIDC TRUST-ROOT MISMATCH` is the one abort in this set that is not a
-    retry.** The read *succeeded*; the answer named a **different repository**
+    retry.** The read _succeeded_; the answer named a **different repository**
     (or a shape that is not a plain `repo:<owner>/<repo>` with GitHub's optional
     `@<digits>` ids). Retrying and re-authenticating change nothing. Bootstrap
     refuses the same value for the same reason, so the remediation is the
@@ -1606,7 +1606,7 @@ ends up in the variable must have **GUID shape** — the test that a placeholder
 fails and a real id passes.
 
 **Distinguish the two rejections.** Every expected-rejection test (T2, T3, T4a,
-T5) is asking one question — *did Azure evaluate the ABAC condition and deny?* —
+T5) is asking one question — _did Azure evaluate the ABAC condition and deny?_ —
 and `az` exits non-zero for that **and** for a request it never evaluated at all.
 Only the first is evidence. What you should see:
 
@@ -2551,22 +2551,51 @@ withholding a bad apply — that is the loop working, not a miss. The
 missed-reconciliation condition is specifically: _the latest main SHA with
 successful required CI is ahead of the last-applied SHA._
 
-**Why it is accepted for MG-23.** Closing it needs a periodic out-of-band checker
-comparing last-applied SHA against latest-green-CI SHA — a new scheduled surface
-that MG-23 does not build. It was deferred deliberately, per operator
+**Why it was accepted for MG-23.** Closing it needs a periodic out-of-band
+checker comparing last-applied SHA against latest-green-CI SHA — a new scheduled
+surface that MG-23 did not build. It was deferred deliberately, per operator
 disposition, as a fail-safe (not wrong-ship, not data-loss) gap.
 
-**Compensating control: none automated today.** Until MG-38 lands, this is a
-**manual** check. Both operator-facing surfaces state the bound honestly rather
-than promising convergence: the stale-SHA guard's log output names the residual
-when it skips, and so does the workflow's step-1 comment. After a red CI on
-`main`, **confirm the eventual green SHA actually reconciled** — check the
-`infra-apply-dev` run list, do not infer it from the commit list.
+**Compensating control: detected, not closed (#224).**
+`.github/workflows/infra-dev-apply-watch.yml` runs
+`apps/infrastructure/scripts/dev-apply-lag-check.sh` every 6 hours (and on
+demand). It compares:
 
-**Tracked as MG-38** (a retired tracker's id):
-a scheduled check that alerts (or auto-triggers a catch-up through this same
-gated sequence) when a green-CI `main` SHA is ahead of the last-applied SHA, and
-that does _not_ false-positive on an intentionally-blocked `main`.
+- the **newest green SHA**: the head SHA of the newest successful CI/CD Pipeline
+  run of a push to `main`, with
+- the **last applied SHA**: the head SHA of the newest `infra-apply-dev` run
+  whose `Terraform apply` step succeeded. A superseded run ends green with that
+  step skipped, so the step decides, not the run's conclusion; a partial apply
+  (the step failed) does not count either.
+
+| Compare (base: applied, head: green) | Meaning                                                                         | Watch run |
+| ------------------------------------ | ------------------------------------------------------------------------------- | --------- |
+| identical                            | In sync, including a red `main` tip whose newest green SHA is applied (state 1) | green     |
+| behind                               | Dev holds something newer (a recovery apply)                                    | green     |
+| ahead, CI finished < 2 h ago         | The apply is still queued or running                                            | green     |
+| ahead, CI finished ≥ 2 h ago         | **Missed reconciliation** (state 2)                                             | **red**   |
+| diverged                             | Dev holds a tree not in `main`'s history                                        | **red**   |
+| any API error or unexpected answer   | Cannot tell — fail closed                                                       | **red**   |
+
+A red scheduled run is the alert: GitHub notifies by email whoever last changed
+the workflow's cron. The watch holds no Azure identity, no environment and no
+secret; it reads runs, jobs and the compare API with its own read-only
+`GITHUB_TOKEN` (`contents: read`, `actions: read`), and it skips until
+`DEV_TF_BACKEND_READY` is `true`, like the apply. It does **not** trigger a
+catch-up apply: when it goes red, run `infra-apply-dev.yml`'s recovery path
+(`workflow_dispatch` on `main`; see
+[§12, "The recovery path"](#the-recovery-path-workflow_dispatch)) and confirm it
+applied. The check's two states and its fail-closed cases are pinned by
+`apps/infrastructure/scripts/fixtures/run-dev-apply-lag-fixtures.sh`, which
+`validate-infrastructure` runs against a fake `gh`.
+
+It leans on two facts about `infra-apply-dev.yml`: the step name begins with
+`Terraform apply`, and a run that applied has, as its head SHA, the SHA it
+applied (both freshness gates required that SHA to be `main`'s tip). Renaming
+that step makes every run look unapplied, and the watch goes red rather than
+silently green.
+
+**Tracked as MG-38** (a retired tracker's id), finished by #224.
 
 ### There is NO PR-time plan — the accepted trade
 
@@ -2680,7 +2709,7 @@ reaches the token's expiry fails on its own, well before 90 minutes, and the
 timeout never enters into it. Do not read the timeout as mitigating this.
 
 **Revisit if dev applies ever approach the token lifetime.** The trigger to watch
-is apply *duration*, not failure count — by the time a 401 shows up the residual
+is apply _duration_, not failure count — by the time a 401 shows up the residual
 has already been accepted for too long. If dev grows to that point, the options
 are token refresh (re-authenticating mid-job, which needs a second assertion) or
 a materially shorter apply timeout paired with splitting the apply. Neither is
@@ -2688,7 +2717,7 @@ warranted at dev's current size; both become warranted together.
 
 > This applies to the **recovery dispatch** path identically — it runs the same
 > authentication and the same sequence. A recovery apply parked on its approval
-> gate is not affected, because `azure/login` runs *after* the gate clears.
+> gate is not affected, because `azure/login` runs _after_ the gate clears.
 
 ### Provider pinning — RESOLVED, not residual
 
@@ -3017,7 +3046,7 @@ Terraform is mid-write by then, and stopping would be worse than finishing.
   > **Do not over-read this as "a newer run always reconciles it."** It does not
   > hold when the superseding commit's CI is red — see the
   > [MG-38 residual](#mg-38--a-superseded-skip-behind-a-red-ci-stalls-reconciliation-silently)
-  > in §10.
+  > in §10, and the scheduled watch that goes red for it.
 
 - **Recovery (`workflow_dispatch`) → FAILS, red.** The operator chose a specific
   moment and reviewed a specific plan, **possibly with a destroy authorization
