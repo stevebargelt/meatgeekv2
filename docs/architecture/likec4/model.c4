@@ -619,7 +619,7 @@ model {
     // Telemetry: the storage path is live end to end.
     edge.pusher.iot -[event]-> cloud.ingest.iothub 'telemetry: messageId, $.ct=application/json, $.ce=utf-8, correlation.id, traceparent' {
       technology 'MQTT 8883, X.509 client certificate, QoS 1'
-      description 'Each reading as JSON with message properties messageId, $.ct=application/json, $.ce=utf-8, correlation.id (cook-scoped, from cooksession) and traceparent (per message, from the publisher.publish span). No Function reads traceparent back.'
+      description 'Each reading as JSON with message properties messageId, $.ct=application/json, $.ce=utf-8, correlation.id (cook-scoped, from cooksession) and traceparent (per message, from the publisher.publish span). broadcastTemperature continues the traceparent with one span per reading.'
     }
     // Provisioning (HAR-130, HAR-146): the device's own certificate is its only credential.
     edge.pusher.iot -> cloud.ingest.dps 'register (HTTPS, mutual TLS with the device certificate)' {

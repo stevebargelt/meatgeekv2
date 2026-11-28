@@ -1,4 +1,6 @@
-import { extractCorrelation, getStandardDimensions } from './correlation';
+import { trace } from '@opentelemetry/api';
+
+import { extractCorrelation, getStandardDimensions, remoteParentContext } from './correlation';
 
 const VALID_TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
 
@@ -112,5 +114,26 @@ describe('getStandardDimensions', () => {
     });
 
     expect(dims['environment']).toBe('dev');
+  });
+});
+
+describe('remoteParentContext (#222)', () => {
+  it('names the traceparent span as a remote, sampled parent', () => {
+    const ctx = remoteParentContext('00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01');
+    expect(ctx && trace.getSpanContext(ctx)).toEqual({
+      traceId: '0af7651916cd43dd8448eb211c80319c',
+      spanId: 'b7ad6b7169203331',
+      traceFlags: 1,
+      isRemote: true,
+    });
+  });
+
+  it.each([
+    undefined,
+    'garbage',
+    '00-00000000000000000000000000000000-b7ad6b7169203331-01',
+    '00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01',
+  ])('gives undefined for %p', value => {
+    expect(remoteParentContext(value)).toBeUndefined();
   });
 });

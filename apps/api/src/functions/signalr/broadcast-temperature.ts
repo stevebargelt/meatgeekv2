@@ -1,8 +1,23 @@
 import type { InvocationContext } from '@azure/functions';
-import { metrics, ValueType, type Attributes, type Meter } from '@opentelemetry/api';
+import {
+  context as otelContext,
+  metrics,
+  SpanKind,
+  trace,
+  ValueType,
+  type Attributes,
+  type Meter,
+  type Tracer,
+} from '@opentelemetry/api';
 
 import { getDevicesRepository } from '../../shared/cosmos/devices-repository';
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
+import {
+  extractCorrelation,
+  getStandardDimensions,
+  remoteParentContext,
+  type ApplicationProperties,
+} from '../../shared/telemetry/correlation';
 import {
   LiveTemperaturePayload,
   signalROutput,
@@ -57,6 +72,15 @@ import {
  * They carry no device or user attribute; the only attribute is
  * `negative: true` on a reading stamped after the time it is compared with
  * (clock skew), recorded as 0.
+ *
+ * TRACES (#222). Each valid reading gets one CONSUMER span,
+ * `broadcastTemperature reading`, whose parent is the message's `traceparent`
+ * application property (set by data-pusher on its publish span), so the reading's
+ * trace runs device-controller → data-pusher → IoT Hub → this Function under one
+ * TraceId. The span carries the six standard dimensions; its correlation id is
+ * the message's `correlation.id`, or the invocation id when absent. A missing or
+ * malformed traceparent leaves the span in the invocation's own trace. Each reading in a batch keeps its
+ * own trace. A failing tracer never fails the batch.
  */
 
 /** The event hub IoT Hub's realtime route writes to. Terraform-owned name. */
@@ -122,13 +146,31 @@ export interface LiveReading {
   readonly payload: LiveTemperaturePayload;
   /** The hub-stamped `iothub-enqueuedtime`, when the event carries a valid one. */
   readonly iothubEnqueuedTime?: string;
+  /** The message's application properties (`traceparent`, `correlation.id`). */
+  readonly properties?: ApplicationProperties;
+}
+
+/** Application properties with byte values decoded as UTF-8 text. */
+function decodeProperties(value: unknown): ApplicationProperties | undefined {
+  if (!isJsonObject(value)) {
+    return undefined;
+  }
+  const decoded: ApplicationProperties = {};
+  for (const [key, raw] of Object.entries(value)) {
+    decoded[key] =
+      raw instanceof Uint8Array
+        ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('utf8')
+        : raw;
+  }
+  return decoded;
 }
 
 /** One batch element as a live reading, or `null` to skip it. */
 function toLiveReading(
   body: unknown,
   systemProperties: unknown,
-  enqueuedTimeUtc: unknown
+  enqueuedTimeUtc: unknown,
+  properties: unknown
 ): LiveReading | null {
   if (!isJsonObject(systemProperties)) {
     return null;
@@ -159,6 +201,7 @@ function toLiveReading(
     deviceId,
     payload: { ...reading, enqueuedTimeUtc: enqueued },
     iothubEnqueuedTime: toIsoString(systemProperties[IOTHUB_ENQUEUED_TIME]),
+    properties: decodeProperties(properties),
   };
 }
 
@@ -179,6 +222,9 @@ export interface BroadcastTemperatureDeps {
   /** The push time the lag is measured to. */
   now(): Date;
   readonly meter: Meter;
+  /** Starts each reading's span in the device's trace (#222); the global
+   *  tracer when absent. */
+  readonly tracer?: Tracer;
 }
 
 export const defaultBroadcastTemperatureDeps: BroadcastTemperatureDeps = {
@@ -189,7 +235,47 @@ export const defaultBroadcastTemperatureDeps: BroadcastTemperatureDeps = {
   get meter() {
     return metrics.getMeter('meatgeek-api');
   },
+  get tracer() {
+    return defaultTracer();
+  },
 };
+
+/** The global tracer, read at call time like the meter. */
+function defaultTracer(): Tracer {
+  return trace.getTracer('meatgeek-api');
+}
+
+/** The span each reading gets in its device's trace. Source-fixed name. */
+export const READING_SPAN = 'broadcastTemperature reading';
+
+/** One CONSUMER span per reading, a child of its message's traceparent. Never
+ *  throws: a failing tracer costs the span, not the push. */
+function traceReadings(
+  readings: readonly LiveReading[],
+  invocationId: string,
+  tracer: Tracer
+): void {
+  for (const reading of readings) {
+    try {
+      const { correlationId, traceparent } = extractCorrelation(reading.properties, invocationId);
+      const parent = remoteParentContext(traceparent);
+      const attributes = getStandardDimensions({
+        deviceId: reading.deviceId,
+        correlationId,
+        cookId: reading.payload.cookId,
+      });
+      // No device parent: the span joins the invocation's own trace.
+      const span = tracer.startSpan(
+        READING_SPAN,
+        { kind: SpanKind.CONSUMER, attributes: { ...attributes } },
+        parent ?? otelContext.active()
+      );
+      span.end();
+    } catch {
+      // Tracing only; never fail the batch.
+    }
+  }
+}
 
 /** `later - earlier` in whole ms, clamped to 0 with `negative: true` when the
  *  reading is stamped after the time it is compared with. */
@@ -268,13 +354,19 @@ export function readingsOfBatch(
   const metadata = context.triggerMetadata ?? {};
   const systemPropertiesArray = arrayOrEmpty(metadata['systemPropertiesArray']);
   const enqueuedTimeUtcArray = arrayOrEmpty(metadata['enqueuedTimeUtcArray']);
+  const propertiesArray = arrayOrEmpty(metadata['propertiesArray']);
 
   const readings: LiveReading[] = [];
   let skipped = 0;
   batch.forEach((body, index) => {
     let reading: LiveReading | null = null;
     try {
-      reading = toLiveReading(body, systemPropertiesArray[index], enqueuedTimeUtcArray[index]);
+      reading = toLiveReading(
+        body,
+        systemPropertiesArray[index],
+        enqueuedTimeUtcArray[index],
+        propertiesArray[index]
+      );
     } catch {
       reading = null;
     }
@@ -298,6 +390,7 @@ export async function broadcastTemperatureHandler(
   deps: BroadcastTemperatureDeps = defaultBroadcastTemperatureDeps
 ): Promise<void> {
   const { readings, skipped } = readingsOfBatch(events, context);
+  traceReadings(readings, context.invocationId, deps.tracer ?? defaultTracer());
 
   const owners = await resolveOwners(
     readings.map(r => r.deviceId),

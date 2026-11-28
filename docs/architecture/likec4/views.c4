@@ -158,7 +158,7 @@ views {
       Two correlation axes ride on each reading. `correlation.id` is cook-scoped: the device
       twin's desired `correlationId` (see `cookStart`), persisted in `cooksession` and stamped
       on every message for the whole cook. `traceparent` is per message, from the
-      `publisher.publish` span; no Function reads it back.
+      `publisher.publish` span; `broadcastTemperature` continues it with one span per reading.
     '''
 
     smoker -> meatgeek.edge.controller 'grill and probe temperatures'

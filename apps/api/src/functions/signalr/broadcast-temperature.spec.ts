@@ -1,5 +1,15 @@
 import type { InvocationContext } from '@azure/functions';
-import type { Attributes, Histogram, Meter } from '@opentelemetry/api';
+import {
+  SpanKind,
+  trace,
+  type Attributes,
+  type Context,
+  type Histogram,
+  type Meter,
+  type Span,
+  type SpanOptions,
+  type Tracer,
+} from '@opentelemetry/api';
 
 import { toTemperatureReading } from '../../shared/cosmos/temperatures-repository';
 import {
@@ -25,6 +35,16 @@ interface TestEvent {
   deviceId?: string;
   iothubEnqueuedTime?: string;
   enqueuedTimeUtc?: string;
+  /** The message's application properties (the device's `traceparent`, ...). */
+  properties?: Record<string, unknown>;
+}
+
+/** One span the handler started: its name, options and parent context. */
+interface StartedSpan {
+  name: string;
+  options: SpanOptions;
+  parent: Context | undefined;
+  ended: boolean;
 }
 
 interface Captured {
@@ -36,6 +56,27 @@ interface Captured {
   lookups: string[];
   /** Every histogram value recorded, by metric name, in record order. */
   recorded: Map<string, Array<{ value: number; attributes: Attributes }>>;
+  /** Every span started, in start order. */
+  spans: StartedSpan[];
+}
+
+/** A tracer that records every span it starts (#222). */
+function recordingTracer(): { tracer: Tracer; spans: StartedSpan[] } {
+  const spans: StartedSpan[] = [];
+  const tracer = {
+    startSpan: (name: string, options: SpanOptions = {}, parent?: Context): Span => {
+      const started: StartedSpan = { name, options, parent, ended: false };
+      spans.push(started);
+      return {
+        end: () => {
+          started.ended = true;
+        },
+        setAttribute: () => undefined,
+        setStatus: () => undefined,
+      } as unknown as Span;
+    },
+  } as unknown as Tracer;
+  return { tracer, spans };
 }
 
 /** The fixed push time every test's handler reads from its clock. */
@@ -67,10 +108,12 @@ function defaultOwner(deviceId: string): string | undefined {
 function invoke(
   events: TestEvent[],
   ownerOf: (deviceId: string) => Promise<string | undefined> = async id => defaultOwner(id),
-  meter?: Meter
+  meter?: Meter,
+  tracer?: Tracer
 ): { run: Promise<void>; captured: Captured } {
   const lookups: string[] = [];
   const telemetry = recordingMeter();
+  const tracing = recordingTracer();
   const deps: BroadcastTemperatureDeps = {
     ownerOf: deviceId => {
       lookups.push(deviceId);
@@ -78,6 +121,7 @@ function invoke(
     },
     now: () => new Date(PUSHED_AT),
     meter: meter ?? telemetry.meter,
+    tracer: tracer ?? tracing.tracer,
   };
   const sets: Array<{ output: unknown; value: unknown }> = [];
   const logs: string[] = [];
@@ -91,6 +135,7 @@ function invoke(
           : { 'iothub-enqueuedtime': e.iothubEnqueuedTime }),
       })),
       enqueuedTimeUtcArray: events.map(e => e.enqueuedTimeUtc),
+      propertiesArray: events.map(e => e.properties ?? {}),
     },
     log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
     warn: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
@@ -105,6 +150,7 @@ function invoke(
     logs,
     lookups,
     recorded: telemetry.recorded,
+    spans: tracing.spans,
     messages: () => {
       const forSignalR = sets.filter(s => s.output === signalROutput);
       return (forSignalR[forSignalR.length - 1]?.value ?? []) as SignalRTemperatureMessage[];
@@ -572,6 +618,135 @@ describe('broadcastTemperatureHandler', () => {
       expect(captured.logs).toEqual([
         'broadcastTemperature sent=1 skipped=0 unowned=0 lookupFailed=0',
       ]);
+    });
+  });
+
+  describe("continuing the device's trace (#222)", () => {
+    const TRACE_ID = '0af7651916cd43dd8448eb211c80319c';
+    const PARENT_SPAN_ID = 'b7ad6b7169203331';
+    const TRACEPARENT = `00-${TRACE_ID}-${PARENT_SPAN_ID}-01`;
+
+    it("starts one consumer span per reading, a child of the message's traceparent", async () => {
+      const { run, captured } = invoke([
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T0,
+          body: { timestamp: T0, cookId: 'cook-1' },
+          properties: { traceparent: TRACEPARENT, 'correlation.id': 'corr-1' },
+        },
+      ]);
+      await run;
+
+      expect(captured.spans).toHaveLength(1);
+      const [span] = captured.spans;
+      expect(span.name).toBe('broadcastTemperature reading');
+      expect(span.options.kind).toBe(SpanKind.CONSUMER);
+      expect(span.ended).toBe(true);
+      const parent = span.parent && trace.getSpanContext(span.parent);
+      expect(parent).toEqual({
+        traceId: TRACE_ID,
+        spanId: PARENT_SPAN_ID,
+        traceFlags: 1,
+        isRemote: true,
+      });
+      expect(span.options.attributes).toEqual(
+        expect.objectContaining({
+          'device.id': 'smoker-a',
+          'cook.id': 'cook-1',
+          'correlation.id': 'corr-1',
+          'processing.path': 'realtime',
+          component: 'function',
+        })
+      );
+    });
+
+    it('keeps each reading in its own trace within one batch', async () => {
+      const other = '00-11111111111111111111111111111111-2222222222222222-00';
+      const { run, captured } = invoke([
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T0,
+          body: { timestamp: T0 },
+          properties: { traceparent: TRACEPARENT },
+        },
+        {
+          deviceId: 'smoker-b',
+          iothubEnqueuedTime: T1,
+          body: { timestamp: T1 },
+          properties: { traceparent: other },
+        },
+      ]);
+      await run;
+
+      const traceIds = captured.spans.map(s => s.parent && trace.getSpanContext(s.parent)?.traceId);
+      expect(traceIds).toEqual([TRACE_ID, '11111111111111111111111111111111']);
+      expect(trace.getSpanContext(captured.spans[1].parent!)?.traceFlags).toBe(0);
+    });
+
+    it("uses the invocation's context and id when the traceparent is missing or malformed", async () => {
+      const { run, captured } = invoke([
+        { deviceId: 'smoker-a', iothubEnqueuedTime: T0, body: { timestamp: T0 } },
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T1,
+          body: { timestamp: T1 },
+          properties: { traceparent: 'not-a-traceparent' },
+        },
+      ]);
+      await run;
+
+      expect(captured.spans).toHaveLength(2);
+      for (const span of captured.spans) {
+        expect(span.parent && trace.getSpanContext(span.parent)).toBeUndefined();
+        expect(span.options.attributes?.['correlation.id']).toBe('broadcast-inv');
+      }
+    });
+
+    it('reads a traceparent sent as bytes', async () => {
+      const { run, captured } = invoke([
+        {
+          deviceId: 'smoker-a',
+          iothubEnqueuedTime: T0,
+          body: { timestamp: T0 },
+          properties: { traceparent: Buffer.from(TRACEPARENT) },
+        },
+      ]);
+      await run;
+
+      expect(trace.getSpanContext(captured.spans[0].parent!)?.traceId).toBe(TRACE_ID);
+    });
+
+    it('starts no span for a skipped event', async () => {
+      const { run, captured } = invoke([
+        { body: { timestamp: T0 }, properties: { traceparent: TRACEPARENT } },
+      ]);
+      await run;
+
+      expect(captured.spans).toEqual([]);
+    });
+
+    it('still pushes the batch when the tracer throws', async () => {
+      const throwing = {
+        startSpan: () => {
+          throw new Error('tracer broken');
+        },
+      } as unknown as Tracer;
+      const { run, captured } = invoke(
+        [
+          {
+            deviceId: 'smoker-a',
+            iothubEnqueuedTime: T0,
+            body: { timestamp: T0 },
+            properties: { traceparent: TRACEPARENT },
+          },
+        ],
+        async id => defaultOwner(id),
+        undefined,
+        throwing
+      );
+      await expect(run).resolves.toBeUndefined();
+
+      expect(captured.messages()).toHaveLength(1);
     });
   });
 });
