@@ -2429,62 +2429,10 @@ IoT Hub → Event Hub → Azure Function → CosmosDB
 
 #### Device Deployment (Raspberry Pi)
 
-**Device Controller (apps/device-controller)**:
-
-```bash
-# Build for ARM architecture
-nx build device-controller --configuration=production
-
-# Deploy to Raspberry Pi
-scp dist/apps/device-controller/MeatGeek-DeviceController pi@192.168.1.37:/home/pi/
-ssh pi@192.168.1.37 'sudo systemctl restart meatgeek-controller'
-```
-
-**Data Pusher (apps/data-pusher)**:
-
-```bash
-# Build for ARM architecture
-nx build data-pusher --configuration=production
-
-# Deploy alongside device controller
-scp dist/apps/data-pusher/meatgeek-pusher pi@192.168.1.37:/home/pi/
-ssh pi@192.168.1.37 'sudo systemctl restart meatgeek-pusher'
-```
-
-**Systemd Service Configuration**:
-
-```ini
-# /etc/systemd/system/meatgeek-controller.service
-[Unit]
-Description=MeatGeek Device Controller
-After=network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi
-ExecStart=/home/pi/MeatGeek-DeviceController
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-
-# /etc/systemd/system/meatgeek-pusher.service
-[Unit]
-Description=MeatGeek Data Pusher
-After=network.target meatgeek-controller.service
-Requires=meatgeek-controller.service
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi
-ExecStart=/home/pi/meatgeek-pusher
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
+Superseded. Both programs go onto a Pi with `apps/data-pusher/deploy/onboard-pi.sh`, which
+installs them as `/usr/local/bin/meatgeek-controller` and `/usr/local/bin/meatgeek-pusher` with the
+units in `apps/data-pusher/deploy/` (the `meatgeek` system user). See
+[the device runbook](devices/runbook.md).
 
 #### Cloud Infrastructure as Code
 
@@ -3454,7 +3402,7 @@ client.TrackMetric("temperature.reading", temp, map[string]string{
    - Add custom NX executor for Go projects
 
 2. Migrate existing device controller
-   - Copy current MeatGeek-DeviceController to `apps/device-controller`
+   - Copy the V1 device controller to `apps/device-controller`
    - Create NX project.json configuration for Go builds
    - Set up cross-compilation for ARM (Raspberry Pi)
    - Maintain existing functionality while integrating with NX
@@ -3645,9 +3593,8 @@ nx affected:build       # Build only changed projects
 nx affected:test        # Test only affected projects
 nx affected:lint        # Lint only affected projects
 
-# Deploy to Raspberry Pi
-nx deploy device-controller --target=pi
-nx deploy data-pusher --target=pi
+# Onboard or update a Raspberry Pi (see docs/devices/runbook.md)
+apps/data-pusher/deploy/onboard-pi.sh pi@<lan ip>
 ```
 
 #### Dependency Graph and Project Relationships

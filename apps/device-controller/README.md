@@ -111,27 +111,14 @@ make format
 
 ### Deployment
 
-#### Manual Deployment to Raspberry Pi
+This Makefile does not deploy. To get a build onto a Pi, follow the
+[device runbook](../../docs/devices/runbook.md): `apps/data-pusher/deploy/onboard-pi.sh`
+(`make deploy-to-pi PI_HOST=pi@<lan ip>` in `apps/data-pusher`) builds this controller,
+installs it as `/usr/local/bin/meatgeek-controller` with
+[its unit](../data-pusher/deploy/meatgeek-controller.service) (the `meatgeek` system user),
+and restarts it. Run it again after pulling a newer build.
 
-```bash
-# Deploy to specific Pi
-make deploy-to-pi PI_HOST=pi@192.168.1.100
-```
-
-#### System Service Installation
-
-On the Raspberry Pi:
-
-```bash
-# Install as systemd service
-make install
-
-# Check service status
-make status
-
-# View live logs
-make logs
-```
+On the Pi, `make status` and `make logs` show the `meatgeek-controller` service.
 
 ### NX Integration
 

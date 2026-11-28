@@ -72,7 +72,7 @@ The MeatGeek V2 system will be implemented in 5 phases over approximately 21 wee
 
 #### Enhanced Device Controller
 - [ ] **Modernize Existing Controller (`apps/device-controller`)**
-  - Copy current MeatGeek-DeviceController to `apps/device-controller`
+  - Copy the V1 device controller to `apps/device-controller`
   - Create NX project.json configuration for Go builds
   - Set up cross-compilation for ARM (Raspberry Pi)
   - Maintain existing functionality while integrating with NX

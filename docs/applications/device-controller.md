@@ -129,7 +129,7 @@ type RTD struct {
 
 ```makefile
 # apps/device-controller/Makefile
-BINARY_NAME=MeatGeek-DeviceController
+BINARY_NAME=meatgeek-controller
 
 .PHONY: build build-arm test lint format clean dev
 
