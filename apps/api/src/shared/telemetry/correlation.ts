@@ -1,13 +1,21 @@
+import {
+  isSpanContextValid,
+  ROOT_CONTEXT,
+  trace,
+  TraceFlags,
+  type Context,
+  type SpanContext,
+} from '@opentelemetry/api';
+
 /**
  * Correlation + standard-dimension helpers for the MeatGeek telemetry pipeline.
  *
- * This is the offline-shippable form of the MG-6 "restore correlation.id on
- * receive" work. There is NO live IoT-Hub receiver Function yet (that lands in
- * Bucket C), so these are pure, unit-tested helpers with no Azure Functions or
- * OpenTelemetry SDK coupling. The eventual receiver wires them together:
- *   1. `extractCorrelation(msg.applicationProperties, context.invocationId)`
- *   2. restore the W3C trace context from the returned `traceparent`
- *   3. attach `getStandardDimensions(...)` to the span.
+ * Pure helpers with no Azure Functions coupling. The live IoT Hub receiver
+ * (`broadcastTemperature`, apps/api/src/functions/signalr/broadcast-temperature.ts)
+ * wires them together for each reading (#222):
+ *   1. `extractCorrelation(properties, context.invocationId)`
+ *   2. `remoteParentContext(traceparent)` restores the device's W3C trace context
+ *   3. `getStandardDimensions(...)` becomes the span's attributes.
  */
 
 /**
@@ -65,6 +73,32 @@ export function extractCorrelation(
       : undefined;
 
   return { correlationId, traceparent };
+}
+
+/**
+ * The OpenTelemetry context whose remote parent is the span a valid W3C
+ * `traceparent` names, so a span started in it continues the device's trace.
+ * `undefined` traceparent (absent or malformed) gives `undefined`: start a
+ * fresh trace.
+ */
+export function remoteParentContext(
+  traceparent: string | undefined,
+  base: Context = ROOT_CONTEXT
+): Context | undefined {
+  if (traceparent === undefined || !TRACEPARENT_RE.test(traceparent)) {
+    return undefined;
+  }
+  const [, traceId, spanId, flags] = traceparent.split('-');
+  const spanContext: SpanContext = {
+    traceId,
+    spanId,
+    traceFlags: parseInt(flags, 16) & TraceFlags.SAMPLED,
+    isRemote: true,
+  };
+  if (!isSpanContextValid(spanContext)) {
+    return undefined;
+  }
+  return trace.setSpanContext(base, spanContext);
 }
 
 /** Known processing paths (see docs/monitoring/observability.md). */
