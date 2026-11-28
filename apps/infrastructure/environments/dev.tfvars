@@ -75,8 +75,9 @@ iot_hub_sku_capacity = 1
 # this DESTROYS AND RECREATES module.cosmos_db.azurerm_cosmosdb_account.main. Dev is
 # greenfield so the recreate is acceptable here, but the apply must be authorized
 # through the dev workflow's destroy guard (authorized_changes).
-cosmos_enable_free_tier   = true
-temperature_data_ttl_days = 7 # Shorter retention for dev (cost savings)
+cosmos_enable_free_tier = true
+# Readings retention is the same in every environment and is set per Reading
+# by the device (ADR 0001), not here.
 
 # Azure Functions — Flex Consumption (MG-24 hosting revision, 2026-07-23).
 # Replaces the inherited Y1 service plan. Flex resolves the Y1 MI-storage 403 by

@@ -311,8 +311,7 @@ module "cosmos_db" {
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
 
-  enable_free_tier     = var.cosmos_enable_free_tier
-  temperature_data_ttl = var.temperature_data_ttl_days * 86400 # Convert days to seconds
+  enable_free_tier = var.cosmos_enable_free_tier
 
   tags = local.common_tags
 }

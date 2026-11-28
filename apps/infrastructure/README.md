@@ -194,7 +194,7 @@ Activation of the dev loop is operator-gated: see
 ### Development (`environments/dev.tfvars`)
 
 - IoT Hub **S1** (required for message routing; F1 does not support routing)
-- V2-owned Cosmos DB, autoscale 400→1000 RU, 7-day telemetry TTL
+- V2-owned Cosmos DB, autoscale 400→1000 RU, per-reading TTL: 7 days in a cook, 24 h outside (ADR 0001)
 - Azure Functions **Flex Consumption** (`FC1` plan), **scale-to-zero** (`always_ready = 0`)
 - SignalR Free (F1) tier
 - IoT Hub Device Provisioning Service (`dps_enabled = true`), see

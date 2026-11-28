@@ -62,13 +62,6 @@ variable "enable_free_tier" {
   default     = false
 }
 
-# TTL configuration for temperature data
-variable "temperature_data_ttl" {
-  description = "TTL for temperature data in seconds (default: 90 days)"
-  type        = number
-  default     = 7776000 # 90 days
-}
-
 # Container-specific configurations
 variable "enable_container_auto_scale" {
   description = "Enable auto-scaling for containers"

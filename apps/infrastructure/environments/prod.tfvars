@@ -68,8 +68,9 @@ iot_hub_sku_capacity = 5    # 5 x 400,000 = 2,000,000/day for 1,728,000/day of l
 # true DESTROYS AND RECREATES module.cosmos_db.azurerm_cosmosdb_account.main — in
 # prod that is PRODUCTION DATA LOSS, and nothing in this graph stops it (there is
 # deliberately no prevent_destroy; see the location warning above and MG-35).
-cosmos_enable_free_tier   = false
-temperature_data_ttl_days = 90 # Full 90-day retention for production
+cosmos_enable_free_tier = false
+# Readings retention is the same in every environment and is set per Reading
+# by the device (ADR 0001), not here.
 
 # Azure Functions — Flex Consumption (MG-24 hosting revision, 2026-07-23).
 # Replaces the inherited EP1 Premium plan. EP1 is NOT retained (MG-24 point 6: no

@@ -90,7 +90,7 @@ rather than trusting the literal.
 | Synthetic marker      | `syntheticFixture` = `MG-67-SYNTHETIC-FIXTURE`                                                                                                             |
 | Per-run correlator    | `fixtureRunId` — a fresh uuid per invocation                                                                                                               |
 | Messages per run      | **3** (`MESSAGES_PER_RUN`, a constant, deliberately not a flag)                                                                                            |
-| Declared dev TTL      | `temperature_data_ttl_days = 7` → **604800s** — the _comparand_, never a fallback                                                                          |
+| Declared dev TTL      | `readings_default_ttl_seconds` = **604800s** (ADR 0001; was `temperature_data_ttl_days = 7`) — the _comparand_, never a fallback                          |
 | The tool              | `apps/infrastructure/scripts/iot-fixture/send-fixture.mjs`                                                                                                 |
 
 ```bash
@@ -231,7 +231,8 @@ definition is a shape, not a credential — so the file is safe to keep and safe
 attach to the ticket.
 
 **Expected:** `partitionKey.paths == ["/deviceId"]` and `defaultTtl == 604800`
-(the declared `temperature_data_ttl_days = 7`).
+(the declared `readings_default_ttl_seconds` in the `cosmos-db` module; see
+[ADR 0001](../adr/0001-readings-are-short-lived-charts-are-permanent.md)).
 
 **If `defaultTtl` differs from 604800**, that is **configuration drift** and the
 tool reports it: the run continues, the **measured** value is what gets used and

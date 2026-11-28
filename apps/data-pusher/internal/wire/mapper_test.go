@@ -283,3 +283,29 @@ func TestOutOfRangeFields_NamesOnlyTheOutOfRangeNumbers(t *testing.T) {
 		t.Fatalf("OutOfRangeFields(empty) = %v, want nil", got)
 	}
 }
+
+// ADR 0001 (#286): each Reading carries its own Cosmos ttl in seconds. One
+// in a Cook expires 7 days after it is written, one outside a Cook after 24h.
+func TestMapV1ToTemperatureReading_TTLFollowsTheCook(t *testing.T) {
+	v1 := V1Status{SmokerID: "meatgeek3"}
+	cookID := "cook-abc-123"
+
+	inCook := MapV1ToTemperatureReading(v1, fixedTS, &cookID)
+	if inCook.TTL != 604800 {
+		t.Errorf("ttl in a cook = %d, want 604800", inCook.TTL)
+	}
+	outside := MapV1ToTemperatureReading(v1, fixedTS, nil)
+	if outside.TTL != 86400 {
+		t.Errorf("ttl outside a cook = %d, want 86400", outside.TTL)
+	}
+}
+
+func TestTemperatureReading_JSON_CarriesTTL(t *testing.T) {
+	b, err := json.Marshal(MapV1ToTemperatureReading(V1Status{SmokerID: "meatgeek3"}, fixedTS, nil))
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if !strings.Contains(string(b), `"ttl":86400`) {
+		t.Fatalf("ttl should appear in JSON as Cosmos reads it, got %s", b)
+	}
+}

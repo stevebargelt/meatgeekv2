@@ -297,15 +297,15 @@ evidence that a deep page no longer costs more. (Before HAR-75 history paged by
 the first.) It relies on the round-trip proof, which runs first, having
 registered the device to the caller.
 
-- **Why a top-up.** The volume cannot be loaded once by hand: readings expire on
-  the dev `temperatures` container TTL, 7 days (`temperature_data_ttl_days` in
-  `apps/infrastructure/environments/dev.tfvars`). Each run restores it when it
-  is short, sending the shortfall plus 60 for readings that expire during the
-  run.
+- **Why a top-up.** The volume cannot be loaded once by hand: every reading
+  expires ([ADR 0001](../adr/0001-readings-are-short-lived-charts-are-permanent.md)).
+  The top-up's readings carry no `cookId`, so simdevice gives each a `ttl` of
+  24 hours. Each run restores the volume when it is short, sending the
+  shortfall plus 60 for readings that expire during the run.
 - **When it happens.** On the first run, and then on the first run after the
   previous top-up's readings expire. A top-up writes its readings within one
-  run, so they all expire together 7 days later: whatever the run frequency,
-  expect a full top-up about once a week. In between, the walk counts at least
+  run, so they all expire together 24 hours later: whatever the run frequency,
+  expect a full top-up about once a day. In between, the walk counts at least
   8,640 (the round trip adds one reading a run) and `METRIC topup-sent 0`.
 - **How long it takes.** The top-up runs `--inflight 32 --interval 50ms`:
   simdevice starts a send every 50 ms and lets up to 32 await IoT Hub's QoS 1

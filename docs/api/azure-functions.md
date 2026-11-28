@@ -174,7 +174,8 @@ tells a foreign device from an unknown one, as the cook routes' `403` does.
 Every answer after the principal check carries `x-meatgeek-request-charge`.
 Only the device document goes. Its cooks stay in the owner's history (`getCooks`
 and `getCook` still return them), and its readings expire on the `temperatures`
-container's TTL (`temperature_data_ttl_days`: 7 in dev, 90 in prod).
+readings' own TTL ([ADR 0001](../adr/0001-readings-are-short-lived-charts-are-permanent.md):
+7 days in a cook, 24 hours outside one).
 
 **Readings from the claim onward (HAR-136).** A device with `claimedAt` (claimed
 through `claimDevice`) bounds every route that returns its readings below by
