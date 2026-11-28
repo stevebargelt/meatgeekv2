@@ -236,9 +236,14 @@ export const defaultBroadcastTemperatureDeps: BroadcastTemperatureDeps = {
     return metrics.getMeter('meatgeek-api');
   },
   get tracer() {
-    return trace.getTracer('meatgeek-api');
+    return defaultTracer();
   },
 };
+
+/** The global tracer, read at call time like the meter. */
+function defaultTracer(): Tracer {
+  return trace.getTracer('meatgeek-api');
+}
 
 /** The span each reading gets in its device's trace. Source-fixed name. */
 export const READING_SPAN = 'broadcastTemperature reading';
@@ -385,7 +390,7 @@ export async function broadcastTemperatureHandler(
   deps: BroadcastTemperatureDeps = defaultBroadcastTemperatureDeps
 ): Promise<void> {
   const { readings, skipped } = readingsOfBatch(events, context);
-  traceReadings(readings, context.invocationId, deps.tracer ?? trace.getTracer('meatgeek-api'));
+  traceReadings(readings, context.invocationId, deps.tracer ?? defaultTracer());
 
   const owners = await resolveOwners(
     readings.map(r => r.deviceId),

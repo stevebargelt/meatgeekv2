@@ -32,7 +32,8 @@ export const TRACEPARENT_PROPERTY = 'traceparent';
  * W3C Trace Context `traceparent` shape: version-traceId-parentId-flags, e.g.
  * `00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01`. Used only to reject
  * malformed values so context restoration never throws — it is not a full
- * spec-compliant validator (e.g. it does not reject the all-zero trace id).
+ * spec-compliant validator: it does not reject the all-zero ids, which
+ * `remoteParentContext` does.
  */
 const TRACEPARENT_RE = /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 
