@@ -1,9 +1,9 @@
 # Monitoring Module for MeatGeek V2
 #
 # Phase 1 observability layer: action group + budgets + diagnostic settings +
-# 3 platform-metric alerts + 2 daily-ingestion-cap log search alerts + workbook
-# stub. The 5 custom-metric alerts
-# (device-disconnected, real-time error rate, storage p95 latency,
+# 3 platform-metric alerts + 2 daily-ingestion-cap log search alerts + the
+# device-silent-during-cook log search alert (#231) + workbook stub. The 4
+# custom-metric alerts (real-time error rate, storage p95 latency,
 # temp-out-of-safe-range, cook-idle) intentionally land in ticket #6 alongside
 # the StandardDimensions emitter — wiring them now produces always-green
 # alerts (no telemetry source emits the required custom metrics yet),
@@ -180,7 +180,7 @@ resource "azurerm_monitor_diagnostic_setting" "signalr" {
 # -----------------------------------------------------------------------------
 # 3 platform-metric alerts wired to the existing action group. The daily
 # ingestion cap is watched by the two log search alerts further down.
-# Custom-metric alerts (device-disconnected, real-time error rate,
+# Custom-metric alerts (real-time error rate,
 # storage p95 latency, temp-out-of-safe-range, cook-idle) are deferred to #6.
 # -----------------------------------------------------------------------------
 
@@ -374,6 +374,54 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "ingestion_near_cap" {
     metric_measure_column   = "BillableMB"
     operator                = "GreaterThan"
     threshold               = var.ingestion_cap_gb * 1000 * var.ingestion_warning_percent / 100
+  }
+
+  action {
+    action_groups = [azurerm_monitor_action_group.main.id]
+  }
+
+  tags = var.tags
+}
+
+# -----------------------------------------------------------------------------
+# #231 — a device went silent during a cook.
+#
+# Silent: the device holds a cook whose status is `active`, its IoT Hub twin
+# says Disconnected, and IoT Hub last heard from it 10 or more minutes ago. A
+# device that is off between cooks holds no active cook, so it never counts.
+#
+# The signal is the twin's connectionState and lastActivityTime, which exist
+# today, read by the API's deviceSilence timer (apps/api/src/functions/devices/
+# device-silence.ts) every 5 minutes. Nothing in the workspace knows which
+# devices have an active cook (that is in Cosmos), so the timer does the join
+# and logs one line of counts to FunctionAppLogs, e.g.
+#   deviceSilence activeCooks=1 silent=1 reporting=0 unknown=0
+# This rule fires when the largest silent= in the last 10 minutes (two timer
+# lines) is above 0. Stateful: one email when it fires, one when it resolves
+# (the device is back, or the cook is stopped).
+#
+# The IoT Hub Connections log was not used: it has every disconnect, but a Pi
+# switched off after a cook disconnects the same way, and the log cannot tell
+# which devices have a cook running.
+# -----------------------------------------------------------------------------
+resource "azurerm_monitor_scheduled_query_rules_alert_v2" "device_silent_during_cook" {
+  name                = "${var.resource_prefix}-device-silent-during-cook"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  scopes              = [var.log_analytics_workspace_id]
+  description         = "A device with an active cook has been disconnected from IoT Hub for 10 minutes or more, so the cook is getting no readings. Check the device: power, network, and the meatgeek-pusher service (systemctl status meatgeek-pusher). If the cook is over, stop it in the app; the alert resolves within 10 minutes. The deviceSilence line in FunctionAppLogs has the counts; GET /devices shows which device is disconnected."
+  severity            = 2
+
+  evaluation_frequency    = "PT5M"
+  window_duration         = "PT10M"
+  auto_mitigation_enabled = true
+
+  criteria {
+    query                   = "FunctionAppLogs | where Message startswith \"deviceSilence \" | extend SilentDevices = toint(extract(@\"silent=(\\d+)\", 1, Message)) | summarize SilentDevices = max(SilentDevices)"
+    time_aggregation_method = "Maximum"
+    metric_measure_column   = "SilentDevices"
+    operator                = "GreaterThan"
+    threshold               = 0
   }
 
   action {

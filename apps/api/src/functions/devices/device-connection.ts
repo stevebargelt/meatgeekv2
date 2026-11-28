@@ -131,6 +131,29 @@ async function mapWithConcurrency<T, R>(
 }
 
 /**
+ * Each device id's connection and read outcome, in input order. `getTwins` is
+ * called once; if it throws every device is `unknown` (`failed`). Never rejects.
+ */
+export async function readConnections(
+  deviceIds: readonly string[],
+  getTwins: () => DeviceTwinPort,
+  limit = CONNECTION_READ_CONCURRENCY
+): Promise<Array<{ connection: DeviceConnection; outcome: ConnectionReadOutcome }>> {
+  let hub: DeviceTwinPort | undefined;
+  try {
+    hub = getTwins();
+  } catch {
+    hub = undefined;
+  }
+  const twins = hub;
+  return mapWithConcurrency(deviceIds, limit, id =>
+    twins
+      ? readOne(twins, id)
+      : Promise.resolve({ connection: UNKNOWN_CONNECTION, outcome: 'failed' as const })
+  );
+}
+
+/**
  * Each device with its `connection`, read from its twin. `getTwins` is called
  * once; if it throws (the hub hostname is not configured) every device is
  * `unknown`. Never rejects.
@@ -147,17 +170,10 @@ export async function withConnections(
     no_twin: 0,
     failed: 0,
   };
-  let twins: DeviceTwinPort | undefined;
-  try {
-    twins = getTwins();
-  } catch {
-    twins = undefined;
-  }
-  const hub = twins;
-  const reads = await mapWithConcurrency(devices, limit, device =>
-    hub
-      ? readOne(hub, device.id)
-      : Promise.resolve({ connection: UNKNOWN_CONNECTION, outcome: 'failed' as const })
+  const reads = await readConnections(
+    devices.map(device => device.id),
+    getTwins,
+    limit
   );
   reads.forEach(read => (counts[read.outcome] += 1));
   return {

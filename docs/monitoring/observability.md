@@ -484,6 +484,8 @@ traces
 
 ### **Device Health Monitoring**
 
+Target design: nothing emits `meatgeek_device_connectivity` today, so this query returns nothing. Device silence during a cook is watched by the live [`device-silent-during-cook`](#device-silent-during-cook-severity-2) alert.
+
 ```kql
 // Monitor device connectivity and performance
 customMetrics
@@ -596,6 +598,16 @@ These are the alerts live in dev today. All of them are Terraform-managed in `ap
 - **Do:** run the same `Usage` query as for `ingestion-cap-reached` to find the table that grew, and fix the source before the cap stops ingestion.
 - **Proof (HAR-179):** with the dev cap temporarily at 0.1 GB, it fired at 2026-11-25T03:29:23Z (349 MB > 80 MB).
 
+### `device-silent-during-cook` (severity 2)
+
+- **Silent means:** the device holds a cook whose status is `active`, its IoT Hub twin says `Disconnected`, and IoT Hub last heard from it 10 or more minutes ago (or never). A device that is off between cooks holds no active cook, so it is never counted. A connected device is never silent, and a drop shorter than 10 minutes is a blip the pusher reconnects from (its queue sends what it buffered). A `paused` cook does not count.
+- **Signal:** the twin's `connectionState` and `lastActivityTime` (plus the reported-properties time), read the way `GET /devices` reads them (`apps/api/src/functions/devices/device-connection.ts`). The API timer `deviceSilence` (`apps/api/src/functions/devices/device-silence.ts`) runs every 5 minutes, lists the active cooks' devices from Cosmos (one cross-partition query) and logs one line of counts to `FunctionAppLogs`, for example `deviceSilence activeCooks=1 silent=1 reporting=0 unknown=0`. It logs no device, cook or user id.
+- **Condition:** log search alert on the workspace. Query `FunctionAppLogs | where Message startswith "deviceSilence "`, the largest `silent=` in a 10-minute window (`PT10M`, two timer lines), evaluated every 5 minutes (`PT5M`), > `0`. Stateful (auto-mitigation on): one email when it fires, one when it resolves.
+- **Means:** a cook is running and its device has stopped sending readings: the Pi lost power or network, or the pusher stopped. The alert fires 10 to 20 minutes after the device goes quiet.
+- **Do:** open the app (or `GET /devices`) to see which device is disconnected. Check the Pi's power and network, then `sudo systemctl status meatgeek-pusher` on it. If the cook is over and the Pi was switched off, stop the cook in the app; the alert resolves within 10 minutes. A forgotten active cook on a Pi that is off keeps this alert fired until the cook is stopped. If the line shows `unknown=` above 0, the API could not read those twins (see `GET /devices` logs); they are not counted as silent.
+- **Why not the IoT Hub `Connections` log:** it has every disconnect, but a Pi switched off after a cook disconnects the same way, and the workspace cannot tell which devices have a cook running.
+- **Proof:** not yet shown on dev; see the pull request for #231 for the steps.
+
 ### `role-assignment-write`, `user-assigned-identity-write`, `cosmos-sql-role-assignment-write` (activity log)
 
 - **Condition:** an `Administrative` activity-log event in the workload resource group for, respectively, `Microsoft.Authorization/roleAssignments/write`, `Microsoft.ManagedIdentity/userAssignedIdentities/write`, and `Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments/write`.
@@ -613,13 +625,7 @@ The KQL alerts in this section are the target design and are not deployed; the l
 
 ### **Critical Alerts**
 
-```kql
-// Device disconnected
-customMetrics
-| where name == "meatgeek_device_connectivity"
-| where value == 0
-| where timestamp > ago(2m)
-```
+The former "Device disconnected" query read a `meatgeek_device_connectivity` metric that nothing emits. It is removed; the live [`device-silent-during-cook`](#device-silent-during-cook-severity-2) alert replaces it.
 
 ```kql
 // High error rate in real-time path

@@ -724,6 +724,26 @@ export class CooksRepository {
       requestCharge: response.requestCharge,
     };
   }
+
+  /**
+   * #231 — the device of every `active` cook, across ALL users: the one
+   * cross-partition query in this repository, run only by the device-silence
+   * timer. It projects `deviceId` alone and excludes the MG-84 lock documents.
+   * Active cooks are few (one per device at most), so it reads them all.
+   * A device with two active cooks appears twice; the caller dedupes.
+   */
+  async listActiveCookDevices(): Promise<{ deviceIds: string[]; requestCharge: number }> {
+    const response = await this.container.items
+      .query<{ deviceId?: unknown }>({
+        query: 'SELECT c.deviceId FROM c WHERE c.status = @status AND NOT IS_DEFINED(c.docType)',
+        parameters: [{ name: '@status', value: 'active' }],
+      })
+      .fetchAll();
+    const deviceIds = response.resources
+      .map(row => row.deviceId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return { deviceIds, requestCharge: response.requestCharge };
+  }
 }
 
 /**
