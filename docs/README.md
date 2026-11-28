@@ -13,7 +13,7 @@ A comprehensive BBQ temperature monitoring and cook management system built with
 
 ### Architecture & Design
 - **[Architecture site](https://stevebargelt.github.io/meatgeekv2/)** - The interactive LikeC4 model, published from `docs/architecture/likec4/` on every merge to `main`
-- **[Architecture diagrams](architecture/diagrams.md)** - Generated from the model and rendered on GitHub
+- **[Architecture diagrams](https://stevebargelt.github.io/meatgeekv2/)** - The LikeC4 site, published from the `.c4` files in [`architecture/likec4/`](architecture/likec4/)
 - **[Architecture model](architecture/likec4/README.md)** - How to preview the site locally and add an element, a view or a flow
 - **[System Overview](architecture/system-overview.md)** - High-level architecture, design decisions, and technology choices
 - **[Monorepo Structure](architecture/monorepo-structure.md)** - NX workspace organization and project relationships

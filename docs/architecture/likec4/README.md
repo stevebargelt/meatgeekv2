@@ -4,9 +4,10 @@ This directory holds the [LikeC4](https://likec4.dev) model of MeatGeek V2. It i
 the source of truth for the architecture diagrams: change the model here, not a
 hand-drawn picture.
 
-The Mermaid diagrams in [`../diagrams.md`](../diagrams.md), which render inline
-on GitHub, are generated from this model and never edited by hand. See
-[Regenerate `diagrams.md`](#regenerate-diagramsmd).
+The diagrams are the views of this model, published on every merge to `main` as
+the [architecture site](https://stevebargelt.github.io/meatgeekv2/) by
+`.github/workflows/architecture-site.yml`. The `.c4` files below are their only
+source.
 
 | File            | Holds                                                                    |
 | --------------- | ------------------------------------------------------------------------ |
@@ -15,8 +16,7 @@ on GitHub, are generated from this model and never edited by hand. See
 | `views.c4`      | Static views, flows (dynamic views) and the shared view styles           |
 | `deployment.c4` | Where things run (dev environment) and the deployment view               |
 
-The toolchain is pinned: `likec4` (`1.61.0`), and `mermaid` (`11.17.2`) with
-`jsdom` for the Mermaid parse check, are exact `devDependencies` in this
+The toolchain is pinned: `likec4` (`1.61.0`) is the exact `devDependency` in this
 directory's own `package.json` and `package-lock.json`. This package is not one
 of the root npm workspaces, so it never touches the app monorepo's lockfile or Nx
 project graph.
@@ -54,13 +54,7 @@ the first that exits `1`:
 1. `likec4 validate .`, which fails on any model error (for example a
    relationship to an element that does not exist);
 2. `scripts/check-honesty.mjs`, which enforces the honesty convention below and
-   names every offender;
-3. `scripts/check-mermaid.mjs`, which parses every `mermaid` code block in
-   `../diagrams.md` with the pinned Mermaid 11 and names each block that fails;
-4. `scripts/gen-diagrams.mjs --check`, which regenerates `diagrams.md` to a temp
-   file and fails when it differs byte-for-byte from the committed file, naming
-   `docs/architecture/diagrams.md`, the first differing line and the regenerate
-   command.
+   names every offender.
 
 Run it before you push; CI's `architecture-model` job runs the same script.
 Further checks will be appended to `check` over time, so always call the script
@@ -70,35 +64,6 @@ rather than `likec4 validate` directly.
 each fixture under `scripts/fixtures/` (stored as `*.c4.fixture` so they never
 join the real model) and passes only if every violating fixture is rejected and
 the clean one is accepted.
-
-## Regenerate `diagrams.md`
-
-After any change to a `.c4` file, regenerate and commit `../diagrams.md` in the
-same pull request:
-
-```sh
-npm --prefix docs/architecture/likec4 run gen:diagrams
-```
-
-`scripts/gen-diagrams.mjs` runs `likec4 gen mmd` and `likec4 export json` into a
-temp directory and writes the file from them: a generated-file header, the
-legend, then every view grouped as landscape and containers, drill-downs,
-deployment, today's flows, and the decided `Target` views. Each view gets its
-title, its description from the model, a link to it on the
-[site](https://stevebargelt.github.io/meatgeekv2/) and its Mermaid. A flow also
-gets its numbered steps with their notes, because the Mermaid flowchart keeps
-neither. A view in no group goes under "Other views", so a new view is never
-dropped; add it to `GROUPS` in the script to place it. The output has no
-timestamps, so it is byte-identical on every run and on every OS.
-
-The legend in `diagrams.md` is copied from this README's "The honesty
-convention" section, from its first paragraph to the tables and the rule, so
-editing that part of the section also means regenerating. If a view's Mermaid
-ever stops parsing, fix it in the generator or, as a last resort, list it in
-`LINK_ONLY` with a reason: that view then shows only its site link and the
-reason, never nothing.
-
-Because `check` fails on a stale file, a hand edit to `diagrams.md` fails CI.
 
 ## The honesty convention
 

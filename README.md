@@ -145,7 +145,7 @@ make deploy-to-pi PI_HOST=pi@192.168.1.100  # Deploy to Pi
 Comprehensive documentation is available in the `/docs` directory:
 
 - **[Architecture site](https://stevebargelt.github.io/meatgeekv2/)** - The interactive LikeC4 model, published from `docs/architecture/likec4/` on every merge to `main`
-- **[Architecture diagrams](docs/architecture/diagrams.md)** - Generated from the model and rendered on GitHub
+- **[Architecture diagrams](https://stevebargelt.github.io/meatgeekv2/)** - The LikeC4 site, published from the `.c4` files in [`docs/architecture/likec4/`](docs/architecture/likec4/)
 - **[Architecture model](docs/architecture/likec4/README.md)** - How to preview the site locally and add an element, a view or a flow
 - **[System Overview](docs/architecture/system-overview.md)** - Architecture and design decisions
 - **[Local Setup](docs/development/local-setup.md)** - Development environment setup
