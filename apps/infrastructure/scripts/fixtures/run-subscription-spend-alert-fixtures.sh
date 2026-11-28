@@ -32,8 +32,9 @@ trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 # The fake az. State lives in $FAKE: calls.log gets one line per call;
 # account.id answers `account show`; subscription.json (or subscription.rc)
 # answers GET /subscriptions/<id>; actiongroup.rc makes the action-group GET
-# fail; a PUT stores its body in budget.json, which the budget GET returns
-# (through readback.jq when present, to simulate Azure storing something else).
+# fail; a PUT stores its body in budget.json (put.rc makes it fail), which the
+# budget GET returns (through readback.jq when present, to simulate Azure storing
+# something else; readback.rc makes it fail; no budget.json is a 404).
 FAKE_AZ="${WORK}/fake-az"
 cat > "$FAKE_AZ" <<'FAKEAZ'
 #!/usr/bin/env bash
@@ -59,8 +60,11 @@ case "$method $url" in
     [ -f "$FAKE/actiongroup.rc" ] && exit "$(cat "$FAKE/actiongroup.rc")"
     echo '{"id":"ag"}' ;;
   "put "*/budgets/*)
+    [ -f "$FAKE/put.rc" ] && exit "$(cat "$FAKE/put.rc")"
     printf '%s' "$body" > "$FAKE/budget.json"; cat "$FAKE/budget.json" ;;
   "get "*/budgets/*)
+    [ -f "$FAKE/readback.rc" ] && exit "$(cat "$FAKE/readback.rc")"
+    [ -f "$FAKE/budget.json" ] || exit 3
     if [ -f "$FAKE/readback.jq" ]; then jq -f "$FAKE/readback.jq" "$FAKE/budget.json"
     else cat "$FAKE/budget.json"; fi ;;
   "get "*/subscriptions/*)
@@ -125,11 +129,35 @@ check "read-back with another amount: exit 1" '[ "$rc" -eq 1 ]'
 fresh; echo '.properties.notifications |= with_entries(.key |= ascii_upcase) | .properties.notifications[].contactGroups |= map(ascii_upcase)' > "$FAKE/readback.jq"; run ensure
 check "read-back differing only in key and id case: exit 0" '[ "$rc" -eq 0 ]'
 
+fresh; echo '.properties.notifications.actual_50.contactEmails = ["someone@example.com"]' > "$FAKE/readback.jq"; run ensure
+check "read-back that kept an email recipient: exit 1" '[ "$rc" -eq 1 ]'
+
+fresh; echo 1 > "$FAKE/put.rc"; run ensure
+check "PUT fails: exit 1" '[ "$rc" -eq 1 ] && grep -q "PUT budget failed" "$FAKE/stderr"'
+
+fresh; echo 1 > "$FAKE/readback.rc"; run ensure
+check "read-back GET fails: exit 1" '[ "$rc" -eq 1 ] && [ "$(puts)" -eq 1 ]'
+
+# --- ensure: the start date of an existing budget is kept --------------------
+fresh; echo '{"properties":{"timePeriod":{"startDate":"2024-03-01T00:00:00Z"}}}' > "$FAKE/budget.json"
+run ensure BUDGET_START_DATE=
+check "existing budget: exit 0 and its start date is kept" \
+  '[ "$rc" -eq 0 ] && [ "$(budget ".properties.timePeriod.startDate")" = "2024-03-01T00:00:00Z" ]'
+
+fresh; run ensure BUDGET_START_DATE=
+check "no budget yet: exit 0 and it starts on the first of a month" \
+  '[ "$rc" -eq 0 ] && budget ".properties.timePeriod.startDate" | grep -Eq "^[0-9]{4}-[0-9]{2}-01T00:00:00Z$"'
+
 fresh; run ensure BUDGET_START_DATE=2026-11-15
 check "start date not on the first: exit 1, no az call" '[ "$rc" -eq 1 ] && [ ! -s "$FAKE/calls.log" ]'
 
 fresh; run ensure MONTHLY_CREDIT=lots
 check "non-numeric credit: exit 1, no az call" '[ "$rc" -eq 1 ] && [ ! -s "$FAKE/calls.log" ]'
+
+for c in 0 007; do
+  fresh; run ensure MONTHLY_CREDIT=$c
+  check "credit ${c}: exit 1, no az call" '[ "$rc" -eq 1 ] && [ ! -s "$FAKE/calls.log" ]'
+done
 
 # --- check-state ------------------------------------------------------------
 sub_doc() { printf '{"subscriptionId":"%s","state":"%s","subscriptionPolicies":{"spendingLimit":"On"}}' "$SUB" "$1" > "$FAKE/subscription.json"; }
@@ -164,6 +192,6 @@ fresh; run nonsense
 check "unknown subcommand: exit 1" '[ "$rc" -eq 1 ]'
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-MIN_CHECKS=28
+MIN_CHECKS=35
 [ "$fail" -eq 0 ] || exit 1
 [ "$pass" -ge "$MIN_CHECKS" ] || { echo "FAIL - only $pass checks ran (floor $MIN_CHECKS)"; exit 1; }

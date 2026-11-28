@@ -38,7 +38,9 @@
 #                       behind by `terraform state rm` instead of adding a second
 #   ACTION_GROUP_RG     default meatgeek-v2-dev-rg
 #   ACTION_GROUP_NAME   default meatgeek-v2-dev-alerts
-#   BUDGET_START_DATE   default the first day of the current UTC month (YYYY-MM-01)
+#   BUDGET_START_DATE   default: the existing budget's start date when it already
+#                       exists (Azure will not change a budget's start date),
+#                       else the first day of the current UTC month (YYYY-MM-01)
 #   AZ_BIN              default az; the fixture harness points it at a fake az
 #
 # Usage:
@@ -54,6 +56,9 @@ ARM="https://management.azure.com"
 BUDGET_API="2023-05-01"
 SUBSCRIPTION_API="2022-12-01"
 ACTION_GROUP_API="2023-01-01"
+BUDGET_NAME="${BUDGET_NAME:-meatgeek-v2-dev-credit-budget}"
+ACTION_GROUP_RG="${ACTION_GROUP_RG:-meatgeek-v2-dev-rg}"
+ACTION_GROUP_NAME="${ACTION_GROUP_NAME:-meatgeek-v2-dev-alerts}"
 
 die() { printf 'subscription-spend-alert: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*" >&2; }
@@ -104,29 +109,50 @@ budget_body() {
       }}}'
 }
 
-# What a read-back must match, normalised so key order and the case Azure
-# returns an action-group id in do not matter.
+# What a read-back must match, normalised so key order, the timestamp format and
+# the case Azure returns an action-group id in do not matter. contactEmails is
+# compared too: a recipient left on an adopted budget breaks "action group only".
 budget_shape() {
-  jq -S '{amount: (.properties.amount | tonumber), timeGrain: .properties.timeGrain,
+  jq -S '{category: .properties.category, amount: (.properties.amount | tonumber),
+    timeGrain: .properties.timeGrain, startDate: (.properties.timePeriod.startDate // "" | .[0:10]),
     notifications: (.properties.notifications | with_entries(.key |= ascii_downcase)
-      | map_values({enabled, operator, threshold: (.threshold | tonumber),
-          thresholdType, contactGroups: ((.contactGroups // []) | map(ascii_downcase) | sort)}))}'
+      | map_values({enabled, operator, threshold: (.threshold | tonumber), thresholdType,
+          contactEmails: ((.contactEmails // []) | map(ascii_downcase) | sort),
+          contactGroups: ((.contactGroups // []) | map(ascii_downcase) | sort)}))}'
 }
 
 ensure() {
-  local sub amount start group url body want got
+  local sub amount start group url body want got existing
   sub="$(subscription_id)"
   amount="${MONTHLY_CREDIT:-200}"
-  printf '%s' "$amount" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "MONTHLY_CREDIT must be a number: '$amount'"
-  start="${BUDGET_START_DATE:-$(date -u +%Y-%m-01)}"
-  printf '%s' "$start" | grep -Eq '^[0-9]{4}-[0-9]{2}-01$' \
-    || die "BUDGET_START_DATE must be the first of a month (YYYY-MM-01): '$start'"
-  group="/subscriptions/${sub}/resourceGroups/${ACTION_GROUP_RG:-meatgeek-v2-dev-rg}/providers/microsoft.insights/actionGroups/${ACTION_GROUP_NAME:-meatgeek-v2-dev-alerts}"
+  printf '%s' "$amount" | grep -Eq '^(0|[1-9][0-9]*)(\.[0-9]+)?$' \
+    && [ "$(printf '%s' "$amount" | jq '. > 0')" = "true" ] \
+    || die "MONTHLY_CREDIT must be a number above 0: '$amount'"
+  if [ -n "${BUDGET_START_DATE:-}" ]; then
+    printf '%s' "$BUDGET_START_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-01$' \
+      || die "BUDGET_START_DATE must be the first of a month (YYYY-MM-01): '$BUDGET_START_DATE'"
+  fi
+  group="/subscriptions/${sub}/resourceGroups/${ACTION_GROUP_RG}/providers/microsoft.insights/actionGroups/${ACTION_GROUP_NAME}"
 
   "$AZ_BIN" rest --method get --url "${ARM}${group}?api-version=${ACTION_GROUP_API}" >/dev/null \
     || die "action group not found: ${group} (apply the dev stack first)"
 
-  url="${ARM}/subscriptions/${sub}/providers/Microsoft.Consumption/budgets/${BUDGET_NAME:-meatgeek-v2-dev-credit-budget}?api-version=${BUDGET_API}"
+  url="${ARM}/subscriptions/${sub}/providers/Microsoft.Consumption/budgets/${BUDGET_NAME}?api-version=${BUDGET_API}"
+  # Azure refuses to move an existing budget's start date (the budget Terraform
+  # created under MG-24 keeps its own), so an existing budget keeps its start.
+  # A failed GET means there is no budget yet; any other failure resurfaces at the PUT.
+  start="${BUDGET_START_DATE:-}"
+  if [ -z "$start" ]; then
+    if existing="$("$AZ_BIN" rest --method get --url "$url" 2>/dev/null)"; then
+      start="$(printf '%s' "$existing" | jq -r '.properties.timePeriod.startDate // "" | .[0:10]')" \
+        || die "existing budget is not JSON"
+      printf '%s' "$start" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+        || die "existing budget has no usable timePeriod.startDate: '$start'"
+    else
+      start="$(date -u +%Y-%m-01)"
+    fi
+  fi
+
   body="$(budget_body "$amount" "$start" "$group")"
   "$AZ_BIN" rest --method put --url "$url" --body "$body" >/dev/null || die "PUT budget failed"
 
@@ -139,7 +165,7 @@ ensure() {
     exit 1
   fi
   printf 'budget %s: amount %s monthly from %s, Actual 50/80/100%% and Forecasted 100%% to %s\n' \
-    "${BUDGET_NAME:-meatgeek-v2-dev-credit-budget}" "$amount" "$start" "$group"
+    "$BUDGET_NAME" "$amount" "$start" "$group"
 }
 
 case "${1:-}" in
