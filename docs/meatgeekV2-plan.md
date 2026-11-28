@@ -88,7 +88,6 @@ meatgeekv2/
 │   │   ├── goqueue/
 │   │   ├── go.mod
 │   │   ├── go.sum
-│   │   ├── build.sh
 │   │   ├── README.md
 │   │   └── project.json
 │   ├── data-pusher/            # New Go service for cloud integration

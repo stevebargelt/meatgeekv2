@@ -118,7 +118,9 @@ installs it as `/usr/local/bin/meatgeek-controller` with
 [its unit](../data-pusher/deploy/meatgeek-controller.service) (the `meatgeek` system user),
 and restarts it. Run it again after pulling a newer build.
 
-On the Pi, `make status` and `make logs` show the `meatgeek-controller` service.
+Onboarding puts only the binaries and units on the Pi, not this repo. There,
+`systemctl status meatgeek-controller` and `journalctl -u meatgeek-controller -f` show the
+service and its logs (`make status` and `make logs` run the same, if you have a checkout on the Pi).
 
 ### NX Integration
 
@@ -212,7 +214,7 @@ Run `make info` to see current build configuration:
 
 ### Common Issues
 
-1. **Permission Errors on Pi**: Ensure the pi user has access to GPIO
+1. **Permission Errors on Pi**: The service runs as `meatgeek`, which needs group `meatgeek` on the SPI and I2C nodes; see the [device runbook](../../docs/devices/runbook.md)
 2. **Port Already in Use**: Check if another instance is running
 3. **Sensor Read Errors**: Verify hardware connections and try mock sensors
 
@@ -222,11 +224,9 @@ Run `make info` to see current build configuration:
 # Start with debug logging
 make dev
 
-# Check systemd service status
-make status
-
-# View detailed logs
-make logs
+# On the Pi: service status and live logs
+systemctl status meatgeek-controller
+journalctl -u meatgeek-controller -f
 ```
 
 ## Contributing
